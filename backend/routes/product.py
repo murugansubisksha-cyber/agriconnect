@@ -1,4 +1,35 @@
-""""
+"""
+product.py
+==========
+Product Management Routes for AgriConnect
+
+Handles:
+ - Add Product
+ - View Products
+ - Update Product
+ - Delete Product (Soft Delete)
+ - Search Products
+ - Category Filters
+ - Farmer Product Management
+"""
+
+from datetime import datetime
+
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import (
+    get_jwt,
+    get_jwt_identity,
+    jwt_required,
+)
+
+from database import db
+from models import Farmer, Product
+
+product_bp = Blueprint(
+    "product",
+    __name__,
+    url_prefix="/api/products"
+)
 
 
 # ---------------------------------------------------------
@@ -102,13 +133,13 @@ def add_product():
         }), 400
 
     try:
-      quantity = float(data["available_quantity"])
-      price = float(data["base_price"])
+        quantity = float(data["available_quantity"])
+        price = float(data["base_price"])
     except (TypeError, ValueError):
-     return jsonify({
-        "success": False,
-        "message": "Quantity and Base Price must be valid numbers."
-    }), 400
+        return jsonify({
+            "success": False,
+            "message": "Quantity and Base Price must be valid numbers."
+        }), 400
 
     if quantity < 0:
         return jsonify({
@@ -126,22 +157,22 @@ def add_product():
 
     if minimum_price is not None:
 
-         try:
-          minimum_price = float(minimum_price)
-         except (TypeError, ValueError):
-           return jsonify({
-        "success": False,
-        "message": "Minimum price must be a valid number."
-        }), 400
+        try:
+            minimum_price = float(minimum_price)
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "message": "Minimum price must be a valid number."
+            }), 400
 
-         if minimum_price <= 0:
-         return jsonify({
+        if minimum_price <= 0:
+            return jsonify({
                 "success": False,
                 "message": "Minimum price must be greater than zero."
             }), 400
 
-            if minimum_price > price:
-                     return jsonify({
+        if minimum_price > price:
+            return jsonify({
                 "success": False,
                 "message": "Minimum price cannot exceed base price."
             }), 400
@@ -167,33 +198,27 @@ def add_product():
 
     if data.get("harvest_date"):
         try:
-    harvest_date = datetime.strptime(
-        data["harvest_date"],
-        "%Y-%m-%d"
-    ).date()
-except ValueError:
-    return jsonify({
-        "success": False,
-        "message": "Invalid harvest date format. Use YYYY-MM-DD."
-    }), 400
+            harvest_date = datetime.strptime(
+                data["harvest_date"],
+                "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "message": "Invalid harvest date format. Use YYYY-MM-DD."
+            }), 400
 
     if data.get("expiry_date"):
         try:
-    expiry_date = datetime.strptime(
-        data["expiry_date"],
-        "%Y-%m-%d"
-    ).date()
-except ValueError:
-    return jsonify({
-        "success": False,
-        "message": "Invalid expiry date format. Use YYYY-MM-DD."
-    }), 400
+            expiry_date = datetime.strptime(
+                data["expiry_date"],
+                "%Y-%m-%d"
+            ).date()
         except ValueError:
             return jsonify({
                 "success": False,
                 "message": "Invalid expiry date format. Use YYYY-MM-DD."
             }), 400
-        ).date()
 
     product = Product(
         farmer_id=farmer.farmer_id,
@@ -224,6 +249,8 @@ except ValueError:
         "message": "Product added successfully.",
         "product": serialize_product(product)
     }), 201
+
+
 # ---------------------------------------------------------
 # Get All Active Products
 # ---------------------------------------------------------
@@ -357,6 +384,8 @@ def get_farmer_products(farmer_id):
             for product in products
         ]
     }), 200
+
+
 # ---------------------------------------------------------
 # Update Product
 # ---------------------------------------------------------
@@ -426,12 +455,12 @@ def update_product(product_id):
     if "available_quantity" in data:
 
         try:
-    quantity = float(data["available_quantity"])
-except (TypeError, ValueError):
-    return jsonify({
-        "success": False,
-        "message": "Invalid quantity."
-    }), 400
+            quantity = float(data["available_quantity"])
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "message": "Invalid quantity."
+            }), 400
 
         if quantity < 0:
             return jsonify({
@@ -460,12 +489,12 @@ except (TypeError, ValueError):
     if "base_price" in data:
 
         try:
-    price = float(data["base_price"])
-except (TypeError, ValueError):
-    return jsonify({
-        "success": False,
-        "message": "Invalid base price."
-    }), 400
+            price = float(data["base_price"])
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "message": "Invalid base price."
+            }), 400
 
         if price <= 0:
             return jsonify({
@@ -481,12 +510,12 @@ except (TypeError, ValueError):
     if "minimum_price" in data:
 
         try:
-    minimum = float(data["minimum_price"])
-except (TypeError, ValueError):
-    return jsonify({
-        "success": False,
-        "message": "Invalid minimum price."
-    }), 400
+            minimum = float(data["minimum_price"])
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "message": "Invalid minimum price."
+            }), 400
 
         if minimum <= 0:
             return jsonify({
@@ -565,6 +594,8 @@ except (TypeError, ValueError):
         "message": "Product updated successfully.",
         "product": serialize_product(product)
     }), 200
+
+
 # ---------------------------------------------------------
 # Soft Delete Product
 # ---------------------------------------------------------
@@ -719,6 +750,8 @@ def get_products_by_district(district):
             for product in products
         ]
     }), 200
+
+
 # ---------------------------------------------------------
 # Update Product Stock
 # ---------------------------------------------------------
@@ -850,34 +883,3 @@ def product_statistics():
             "out_of_stock": out_of_stock
         }
     }), 200
-product.py
-     ==========
-      Product Management Routes for AgriConnect
-
-     Handles:
-      - Add Product
-      - View Products
-      - Update Product
-    - Delete Product (Soft Delete)
-    - Search Products
-    - Category Filters
-    - Farmer Product Management
-"""
-
-from datetime import datetime
-
-from flask import Blueprint, jsonify, request
-from flask_jwt_extended import (
-    get_jwt,
-    get_jwt_identity,
-    jwt_required,
-)
-
-from database import db
-from models import Farmer, Product
-
-product_bp = Blueprint(
-    "product",
-    __name__,
-    url_prefix="/api/products"
-)
