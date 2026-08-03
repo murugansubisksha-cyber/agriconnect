@@ -716,6 +716,46 @@ def quotation_status(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
+
+    """
+    Returns just the current status of a quotation,
+    for lightweight polling from the frontend.
+    """
+
+    quotation = db.query(Quotation).filter(
+        Quotation.id == quotation_id
+    ).first()
+
+    if not quotation:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Quotation not found"
+        )
+
+    if (
+        quotation.customer_id != current_user.id
+        and
+        quotation.farmer_id != current_user.id
+    ):
+
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied"
+        )
+
+    return {
+
+        "quotation_id":
+        quotation.id,
+
+        "status":
+        quotation.status
+
+    }
+
+
+
 # ==========================================
 # Farmer Quotation Analytics
 # ==========================================

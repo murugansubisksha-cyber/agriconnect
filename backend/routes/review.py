@@ -871,201 +871,6 @@ def farmer_trust_score(
 def top_rated_products(
     db: Session = Depends(get_db)
 ):
-# ==========================================
-
-@router.get("/analytics/summary")
-def review_analytics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Review statistics for users.
-    """
-
-
-    if current_user.role == "farmer":
-
-        reviews = db.query(Review).filter(
-            Review.farmer_id == current_user.id
-        ).all()
-
-
-    elif current_user.role == "customer":
-
-        reviews = db.query(Review).filter(
-            Review.customer_id == current_user.id
-        ).all()
-
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    total_reviews = len(reviews)
-
-
-
-    if total_reviews == 0:
-
-        return {
-
-            "total_reviews": 0,
-
-            "average_rating": 0,
-
-            "rating_distribution": {}
-
-        }
-
-
-
-    average_rating = sum(
-        review.rating
-        for review in reviews
-    ) / total_reviews
-
-
-
-    distribution = {
-
-        "5_star": 0,
-
-        "4_star": 0,
-
-        "3_star": 0,
-
-        "2_star": 0,
-
-        "1_star": 0
-
-    }
-
-
-
-    for review in reviews:
-
-        if review.rating == 5:
-
-            distribution["5_star"] += 1
-
-        elif review.rating == 4:
-
-            distribution["4_star"] += 1
-
-        elif review.rating == 3:
-
-            distribution["3_star"] += 1
-
-        elif review.rating == 2:
-
-            distribution["2_star"] += 1
-
-        elif review.rating == 1:
-
-            distribution["1_star"] += 1
-
-
-
-    return {
-
-        "total_reviews":
-        total_reviews,
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "rating_distribution":
-        distribution
-
-    }
-
-
-
-# ==========================================
-# Farmer Trust Score
-# ==========================================
-
-@router.get("/farmer/{farmer_id}/trust-score")
-def farmer_trust_score(
-    farmer_id: int,
-    db: Session = Depends(get_db)
-):
-
-    """
-    Calculates farmer reliability score.
-
-    Used for:
-        - Buyer confidence
-        - Recommendation ranking
-    """
-
-
-    reviews = db.query(Review).filter(
-        Review.farmer_id == farmer_id
-    ).all()
-
-
-
-    if not reviews:
-
-        return {
-
-            "farmer_id":
-            farmer_id,
-
-            "trust_score":
-            0
-
-        }
-
-
-
-    average_rating = sum(
-        review.rating
-        for review in reviews
-    ) / len(reviews)
-
-
-
-    # Simple trust score formula
-    trust_score = (
-        average_rating / 5
-    ) * 100
-
-
-
-    return {
-
-        "farmer_id":
-        farmer_id,
-
-        "total_reviews":
-        len(reviews),
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "trust_score":
-        round(trust_score, 2)
-
-    }
-
-
-
-# ==========================================
-# Top Rated Products
-# ==========================================
-
-@router.get("/top-products")
-def top_rated_products(
-    db: Session = Depends(get_db)
-):
 
     """
     Returns products with best ratings.
@@ -1172,9 +977,11 @@ def search_reviews(
 
     for review in reviews:
 
+        comment_text = review.comment or ""
+
         if (
             keyword.lower()
-            in review.comment.lower()
+            in comment_text.lower()
 
             or
 
@@ -1301,18 +1108,26 @@ def farmer_review_dashboard(
     current_user = Depends(get_current_user)
 ):
 
+    """
+    Farmer's overview of all reviews:
+    stats, rating distribution, and
+    which reviews still need a response.
+    """
+
 
     if current_user.role != "farmer":
 
         raise HTTPException(
             status_code=403,
-            detail="Only farmers can access dashboard"
+            detail="Only farmers can view this dashboard"
         )
 
 
 
     reviews = db.query(Review).filter(
         Review.farmer_id == current_user.id
+    ).order_by(
+        Review.created_at.desc()
     ).all()
 
 
@@ -1321,34 +1136,112 @@ def farmer_review_dashboard(
 
 
 
-    average_rating = 0
+    if total_reviews == 0:
+
+        return {
+
+            "total_reviews": 0,
+
+            "average_rating": 0,
+
+            "rating_distribution": {},
+
+            "pending_responses": 0,
+
+            "recent_reviews": []
+
+        }
 
 
-    if total_reviews > 0:
 
-        average_rating = (
-            sum(
-                review.rating
-                for review in reviews
-            )
-            /
-            total_reviews
-        )
-
-
-
-    responses = len([
-        review
+    average_rating = sum(
+        review.rating
         for review in reviews
-        if review.farmer_response
-    ])
+    ) / total_reviews
+
+
+
+    distribution = {
+
+        "5_star": 0,
+
+        "4_star": 0,
+
+        "3_star": 0,
+
+        "2_star": 0,
+
+        "1_star": 0
+
+    }
+
+
+
+    for review in reviews:
+
+        if review.rating == 5:
+
+            distribution["5_star"] += 1
+
+        elif review.rating == 4:
+
+            distribution["4_star"] += 1
+
+        elif review.rating == 3:
+
+            distribution["3_star"] += 1
+
+        elif review.rating == 2:
+
+            distribution["2_star"] += 1
+
+        elif review.rating == 1:
+
+            distribution["1_star"] += 1
+
+
+
+    pending_responses = sum(
+        1
+        for review in reviews
+        if not getattr(review, "farmer_response", None)
+    )
+
+
+
+    recent_reviews = []
+
+
+    for review in reviews[:10]:
+
+        recent_reviews.append({
+
+            "review_id":
+            review.id,
+
+            "product_id":
+            review.product_id,
+
+            "customer_id":
+            review.customer_id,
+
+            "rating":
+            review.rating,
+
+            "comment":
+            review.comment,
+
+            "farmer_response":
+            getattr(review, "farmer_response", None),
+
+            "date":
+            review.created_at
+
+        })
 
 
 
     return {
-
-        "farmer_id":
-        current_user.id,
 
         "total_reviews":
         total_reviews,
@@ -1356,90 +1249,13 @@ def farmer_review_dashboard(
         "average_rating":
         round(average_rating, 2),
 
-        "responses_given":
-        responses
+        "rating_distribution":
+        distribution,
 
-    }
+        "pending_responses":
+        pending_responses,
 
-
-
-# ==========================================
-# Customer Feedback Summary
-# ==========================================
-
-@router.get("/customer/summary")
-def customer_feedback_summary(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can view summary"
-        )
-
-
-
-    reviews = db.query(Review).filter(
-        Review.customer_id == current_user.id
-    ).all()
-
-
-
-    return {
-
-        "customer_id":
-        current_user.id,
-
-        "total_reviews":
-        len(reviews),
-
-        "products_reviewed":
-        len(
-            set(
-                review.product_id
-                for review in reviews
-            )
-        )
-
-    }
-
-
-
-# ==========================================
-# Review Module Status
-# ==========================================
-
-@router.get("/")
-def review_home():
-
-    return {
-
-        "module":
-        "Review Management",
-
-        "status":
-        "active",
-
-        "features":
-
-        [
-
-            "Product Reviews",
-
-            "Farmer Ratings",
-
-            "Trust Score",
-
-            "Review Analytics",
-
-            "Feedback System",
-
-            "Rating Distribution"
-
-        ]
+        "recent_reviews":
+        recent_reviews
 
     }
