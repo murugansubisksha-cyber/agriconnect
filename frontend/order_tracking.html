@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriConnect - Order Tracking</title>
+
+    <link rel="stylesheet" href="order_tracking.css">
+</head>
+
+<body>
+
+<header>
+
+    <h2>🚚 AgriConnect - Order Tracking</h2>
+
+    <nav>
+
+        <a href="dashboard.html">Dashboard</a>
+        <a href="farmer.html">Farmer</a>
+        <a href="customer.html">Customer</a>
+        <a href="quotation.html">Quotation</a>
+        <a href="ai_result.html">AI Result</a>
+        <a href="login.html">Logout</a>
+
+    </nav>
+
+</header>
+
+<section class="container">
+
+    <h1>My Orders</h1>
+
+    <table>
+
+        <thead>
+
+            <tr>
+                <th>Order ID</th>
+                <th>Product</th>
+                <th>Quantity</th>
+                <th>Total Price</th>
+                <th>Payment</th>
+                <th>Order Status</th>
+                <th>Track</th>
+            </tr>
+
+        </thead>
+
+        <tbody id="orderTable">
+
+            <!-- Orders loaded by JavaScript -->
+
+        </tbody>
+
+    </table>
+
+</section>
+
+<!-- Tracking Popup -->
+
+<div id="trackingModal" class="modal">
+
+    <div class="modal-content">
+
+        <span class="close" onclick="closeTracking()">&times;</span>
+
+        <h2>Order Tracking</h2>
+
+        <div class="timeline">
+
+            <div class="step" id="step1">
+                <span>1</span>
+                <p>Order Placed</p>
+            </div>
+
+            <div class="step" id="step2">
+                <span>2</span>
+                <p>Accepted</p>
+            </div>
+
+            <div class="step" id="step3">
+                <span>3</span>
+                <p>Packed</p>
+            </div>
+
+            <div class="step" id="step4">
+                <span>4</span>
+                <p>Out for Delivery</p>
+            </div>
+
+            <div class="step" id="step5">
+                <span>5</span>
+                <p>Delivered</p>
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+<script src="order_tracking.js"></script>
+
+</body>
+</html>
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+    font-family:Arial, Helvetica, sans-serif;
+}
+
+body{
+    background:#f4f8f4;
+}
+
+header{
+    background:#2e7d32;
+    color:white;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:20px;
+    flex-wrap:wrap;
+}
+
+header h2{
+    font-size:28px;
+}
+
+nav a{
+    color:white;
+    text-decoration:none;
+    margin-left:20px;
+    font-weight:bold;
+}
+
+nav a:hover{
+    color:#ffeb3b;
+}
+
+.container{
+    width:95%;
+    max-width:1200px;
+    margin:30px auto;
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    box-shadow:0 5px 15px rgba(0,0,0,.15);
+}
+
+.container h1{
+    color:#2e7d32;
+    text-align:center;
+    margin-bottom:20px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+th{
+    background:#2e7d32;
+    color:white;
+    padding:14px;
+}
+
+td{
+    padding:14px;
+    text-align:center;
+    border-bottom:1px solid #ddd;
+}
+
+tr:hover{
+    background:#f1f8e9;
+}
+
+.track-btn{
+    background:#2e7d32;
+    color:white;
+    border:none;
+    padding:8px 16px;
+    border-radius:6px;
+    cursor:pointer;
+}
+
+.track-btn:hover{
+    background:#1b5e20;
+}
+
+.modal{
+    display:none;
+    position:fixed;
+    left:0;
+    top:0;
+    width:100%;
+    height:100%;
+    background:rgba(0,0,0,.5);
+}
+
+.modal-content{
+    width:500px;
+    max-width:95%;
+    background:white;
+    margin:80px auto;
+    padding:30px;
+    border-radius:12px;
+    position:relative;
+}
+
+.close{
+    position:absolute;
+    right:20px;
+    top:15px;
+    font-size:30px;
+    cursor:pointer;
+}
+
+.timeline{
+    margin-top:30px;
+}
+
+.step{
+    display:flex;
+    align-items:center;
+    margin:18px 0;
+    opacity:.4;
+}
+
+.step span{
+    width:40px;
+    height:40px;
+    border-radius:50%;
+    background:#bdbdbd;
+    color:white;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    font-weight:bold;
+    margin-right:20px;
+}
+
+.step.active{
+    opacity:1;
+}
+
+.step.active span{
+    background:#2e7d32;
+}
+
+@media(max-width:768px){
+
+header{
+    flex-direction:column;
+    text-align:center;
+}
+
+nav{
+    margin-top:15px;
+}
+
+nav a{
+    display:block;
+    margin:10px 0;
+}
+
+.container{
+    overflow-x:auto;
+}
+
+table{
+    min-width:850px;
+}
+
+.modal-content{
+    width:95%;
+}
+
+}
+const API_URL = "http://127.0.0.1:5000/api/orders";
+
+document.addEventListener("DOMContentLoaded", () => {
+    loadOrders();
+});
+
+// Load Orders
+async function loadOrders() {
+
+    const token = localStorage.getItem("access_token");
+
+    try {
+
+        const response = await fetch(API_URL, {
+
+            method: "GET",
+
+            headers: {
+                "Authorization": "Bearer " + token
+            }
+
+        });
+
+        const orders = await response.json();
+
+        const table = document.getElementById("orderTable");
+
+        table.innerHTML = "";
+
+        orders.forEach(order => {
+
+            table.innerHTML += `
+
+            <tr>
+
+                <td>${order.id}</td>
+
+                <td>${order.product_name}</td>
+
+                <td>${order.quantity}</td>
+
+                <td>₹${order.total_price}</td>
+
+                <td>${order.payment_status}</td>
+
+                <td>${order.order_status}</td>
+
+                <td>
+
+                    <button
+                    class="track-btn"
+                    onclick="showTracking('${order.order_status}')">
+
+                    Track
+
+                    </button>
+
+                </td>
+
+            </tr>
+
+            `;
+
+        });
+
+    } catch (error) {
+
+        console.log(error);
+
+    }
+
+}
+
+// Show Tracking Timeline
+function showTracking(status) {
+
+    document.getElementById("trackingModal").style.display = "block";
+
+    document.querySelectorAll(".step").forEach(step => {
+
+        step.classList.remove("active");
+
+    });
+
+    document.getElementById("step1").classList.add("active");
+
+    if (
+        status === "Accepted" ||
+        status === "Packed" ||
+        status === "Out for Delivery" ||
+        status === "Delivered"
+    ) {
+
+        document.getElementById("step2").classList.add("active");
+
+    }
+
+    if (
+        status === "Packed" ||
+        status === "Out for Delivery" ||
+        status === "Delivered"
+    ) {
+
+        document.getElementById("step3").classList.add("active");
+
+    }
+
+    if (
+        status === "Out for Delivery" ||
+        status === "Delivered"
+    ) {
+
+        document.getElementById("step4").classList.add("active");
+
+    }
+
+    if (status === "Delivered") {
+
+        document.getElementById("step5").classList.add("active");
+
+    }
+
+}
+
+// Close Tracking Popup
+function closeTracking() {
+
+    document.getElementById("trackingModal").style.display = "none";
+
+}
+
+// Close popup when clicking outside
+window.onclick = function(event) {
+
+    const modal = document.getElementById("trackingModal");
+
+    if (event.target === modal) {
+
+        closeTracking();
+
+    }
+
+};
