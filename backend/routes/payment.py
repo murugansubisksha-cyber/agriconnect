@@ -2,921 +2,350 @@
 payment.py
 ==========
 
-Payment management routes for AgriConnect.
+Payment management routes for AgriConnect (Flask).
 
 Features:
-    - Create payment record
+    - Create a payment record for an order
     - View payment details
-    - Update payment status
-    - Track transaction history
-    - Connect with orders
+    - Update payment status (mock gateway callback)
+    - Track a customer's / farmer's payment history
 """
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
-from backend.database import get_db
-from backend.models import Payment, Order
-from backend.schemas import (
-    PaymentCreate,
-    PaymentStatusUpdate
-)
+from database import db
+from models import Customer, Farmer, Order, Payment
 
-from backend.auth import get_current_user
-
-
-router = APIRouter(
-    prefix="/payments",
-    tags=["Payments"]
+payment_bp = Blueprint(
+    "payment",
+    __name__,
+    url_prefix="/api/payments"
 )
 
 
+# ==========================================================
+# Constants
+# ==========================================================
 
-# ==========================================
-# Create Payment
-# ==========================================
+VALID_PAYMENT_METHODS = (
+    "UPI",
+    "Debit Card",
+    "Credit Card",
+    "Net Banking",
+    "Cash on Delivery",
+)
 
-@router.post("/")
-def create_payment(
-    payment_data: PaymentCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+VALID_PAYMENT_STATUS = (
+    "Pending",
+    "Success",
+    "Failed",
+    "Refunded",
+)
 
+
+# ==========================================================
+# Helper Functions
+# ==========================================================
+
+def current_user():
+    """Return (user_type, user_object) for the logged-in JWT identity."""
+
+    claims = get_jwt()
+    user_type = claims.get("user_type")
+    user_id = int(get_jwt_identity())
+
+    if user_type == "farmer":
+        return user_type, Farmer.query.filter_by(
+            farmer_id=user_id, active_status=True
+        ).first()
+
+    if user_type == "customer":
+        return user_type, Customer.query.filter_by(
+            customer_id=user_id, active_status=True
+        ).first()
+
+    return None, None
+
+
+def serialize_payment(payment):
+    return {
+        "payment_id": payment.payment_id,
+        "order_id": payment.order_id,
+        "transaction_id": payment.transaction_id,
+        "payment_method": payment.payment_method,
+        "payment_status": payment.payment_status,
+        "payment_amount": payment.payment_amount,
+        "payment_date": (
+            payment.payment_date.isoformat()
+            if payment.payment_date else None
+        ),
+    }
+
+
+# ==========================================================
+# Create Payment (Customer)
+# ==========================================================
+
+@payment_bp.route("/", methods=["POST"])
+@jwt_required()
+def create_payment():
     """
-    Customer creates payment for an order
+    Customer initiates payment for their own order.
+    On success, keeps Order.payment_status in sync.
     """
 
+    user_type, user = current_user()
 
-    if current_user.role != "customer":
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can make payments."
+        }), 403
 
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can make payments"
-        )
+    data = request.get_json(silent=True) or {}
 
+    order_id = data.get("order_id")
+    payment_method = data.get("payment_method")
 
-    order = db.query(Order).filter(
-        Order.id == payment_data.order_id
-    ).first()
+    if not order_id or not payment_method:
+        return jsonify({
+            "success": False,
+            "message": "order_id and payment_method are required."
+        }), 400
 
+    if payment_method not in VALID_PAYMENT_METHODS:
+        return jsonify({
+            "success": False,
+            "message": f"payment_method must be one of {VALID_PAYMENT_METHODS}."
+        }), 400
 
-    if not order:
+    order = Order.query.filter_by(order_id=order_id).first()
 
-        raise HTTPException(
-            status_code=404,
-            detail="Order not found"
-        )
+    if order is None:
+        return jsonify({"success": False, "message": "Order not found."}), 404
 
+    if order.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "This is not your order."}), 403
 
-    if order.customer_id != current_user.id:
+    if order.payment:
+        return jsonify({
+            "success": False,
+            "message": "A payment record already exists for this order."
+        }), 409
 
-        raise HTTPException(
-            status_code=403,
-            detail="This order does not belong to you"
-        )
-
+    # Mock gateway: Cash on Delivery starts Pending, everything else we
+    # mark Success immediately since there's no real payment gateway wired up.
+    status = "Pending" if payment_method == "Cash on Delivery" else "Success"
 
     payment = Payment(
-
-        order_id = order.id,
-
-        customer_id = current_user.id,
-
-        amount = payment_data.amount,
-
-        payment_method = payment_data.payment_method,
-
-        payment_status = "pending"
-
+        order_id=order.order_id,
+        transaction_id=data.get("transaction_id"),
+        payment_method=payment_method,
+        payment_status=status,
+        payment_amount=order.total_amount + (order.delivery_charge or 0.0),
     )
 
+    db.session.add(payment)
 
-    db.add(payment)
+    order.payment_status = "Paid" if status == "Success" else "Pending"
 
-    db.commit()
+    db.session.commit()
 
-    db.refresh(payment)
+    return jsonify({
+        "success": True,
+        "message": "Payment recorded.",
+        "payment": serialize_payment(payment)
+    }), 201
 
 
-    return {
+# ==========================================================
+# Get Single Payment
+# ==========================================================
 
-        "message": "Payment initiated successfully",
+@payment_bp.route("/<int:payment_id>", methods=["GET"])
+@jwt_required()
+def get_payment(payment_id):
 
-        "payment_id": payment.id,
+    user_type, user = current_user()
 
-        "order_id": order.id,
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
 
-        "status": payment.payment_status
+    payment = Payment.query.filter_by(payment_id=payment_id).first()
 
-    }
-# ==========================================
-# Get Payment Details
-# ==========================================
+    if payment is None:
+        return jsonify({"success": False, "message": "Payment not found."}), 404
 
-@router.get("/{payment_id}")
-def get_payment_details(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+    order = payment.order
 
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
+    if user_type == "customer" and order.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
+    if user_type == "farmer" and order.farmer_id != user.farmer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-    if not payment:
+    return jsonify({
+        "success": True,
+        "payment": serialize_payment(payment)
+    }), 200
 
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
 
+# ==========================================================
+# Get Payment By Order
+# ==========================================================
 
-    order = db.query(Order).filter(
-        Order.id == payment.order_id
-    ).first()
+@payment_bp.route("/order/<int:order_id>", methods=["GET"])
+@jwt_required()
+def get_payment_by_order(order_id):
 
+    user_type, user = current_user()
 
-    # Customer can view own payment
-    if current_user.role == "customer":
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
 
-        if payment.customer_id != current_user.id:
+    order = Order.query.filter_by(order_id=order_id).first()
 
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied"
-            )
+    if order is None:
+        return jsonify({"success": False, "message": "Order not found."}), 404
 
+    if user_type == "customer" and order.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-    # Farmer can view payments for their orders
-    elif current_user.role == "farmer":
+    if user_type == "farmer" and order.farmer_id != user.farmer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-        if order.farmer_id != current_user.id:
+    if order.payment is None:
+        return jsonify({"success": False, "message": "No payment recorded for this order."}), 404
 
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied"
-            )
+    return jsonify({
+        "success": True,
+        "payment": serialize_payment(order.payment)
+    }), 200
 
 
-    return {
-
-        "payment_id": payment.id,
-
-        "order_id": payment.order_id,
-
-        "amount": payment.amount,
-
-        "payment_method": payment.payment_method,
-
-        "payment_status": payment.payment_status,
-
-        "created_at": payment.created_at
-
-    }
-
-
-
-# ==========================================
-# Customer Payment History
-# ==========================================
-
-@router.get("/customer/history")
-def customer_payment_history(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can access payment history"
-        )
-
-
-    payments = db.query(Payment).filter(
-        Payment.customer_id == current_user.id
-    ).order_by(
-        Payment.created_at.desc()
-    ).all()
-
-
-    history = []
-
-
-    for payment in payments:
-
-        history.append({
-
-            "payment_id": payment.id,
-
-            "order_id": payment.order_id,
-
-            "amount": payment.amount,
-
-            "method": payment.payment_method,
-
-            "status": payment.payment_status,
-
-            "date": payment.created_at
-
-        })
-
-
-    return {
-
-        "total_payments": len(history),
-
-        "payments": history
-
-    }
-
-
-
-# ==========================================
-# Farmer Payment Summary
-# ==========================================
-
-@router.get("/farmer/summary")
-def farmer_payment_summary(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can view payment summary"
-        )
-
-
-    orders = db.query(Order).filter(
-        Order.farmer_id == current_user.id
-    ).all()
-
-
-    order_ids = [
-        order.id
-        for order in orders
-    ]
-
-
-    payments = db.query(Payment).filter(
-        Payment.order_id.in_(order_ids)
-    ).all()
-
-
-    total_amount = sum(
-        payment.amount
-        for payment in payments
-        if payment.payment_status == "paid"
-    )
-
-
-    return {
-
-        "total_orders": len(order_ids),
-
-        "completed_payments": len(payments),
-
-        "earned_amount": total_amount
-
-    }
-# ==========================================
+# ==========================================================
 # Update Payment Status
-# ==========================================
+# ==========================================================
 
-@router.put("/{payment_id}/status")
-def update_payment_status(
-    payment_id: int,
-    status_data: PaymentStatusUpdate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
+@payment_bp.route("/<int:payment_id>/status", methods=["PUT"])
+@jwt_required()
+def update_payment_status(payment_id):
     """
-    Updates payment status after transaction response.
-
-    Status:
-        pending
-        paid
-        failed
+    Update a payment's status (e.g. Cash on Delivery collected -> Success,
+    or a refund issued -> Refunded). Restricted to the customer who owns
+    the order or the farmer fulfilling it.
     """
 
+    user_type, user = current_user()
 
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
 
+    payment = Payment.query.filter_by(payment_id=payment_id).first()
 
-    if not payment:
+    if payment is None:
+        return jsonify({"success": False, "message": "Payment not found."}), 404
 
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
+    order = payment.order
 
+    if user_type == "customer" and order.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-    if current_user.role != "customer":
+    if user_type == "farmer" and order.farmer_id != user.farmer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can update payment"
-        )
+    data = request.get_json(silent=True) or {}
+    new_status = data.get("payment_status")
 
+    if new_status not in VALID_PAYMENT_STATUS:
+        return jsonify({
+            "success": False,
+            "message": f"payment_status must be one of {VALID_PAYMENT_STATUS}."
+        }), 400
 
-    if payment.customer_id != current_user.id:
+    payment.payment_status = new_status
+    order.payment_status = "Paid" if new_status == "Success" else new_status
 
-        raise HTTPException(
-            status_code=403,
-            detail="You cannot modify this payment"
-        )
+    db.session.commit()
 
+    return jsonify({
+        "success": True,
+        "message": "Payment status updated.",
+        "payment": serialize_payment(payment)
+    }), 200
 
-    allowed_status = [
-        "pending",
-        "paid",
-        "failed"
-    ]
 
+# ==========================================================
+# List Payments -- Customer's Own
+# ==========================================================
 
-    if status_data.status not in allowed_status:
+@payment_bp.route("/customer", methods=["GET"])
+@jwt_required()
+def customer_payments():
 
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid payment status"
-        )
+    user_type, user = current_user()
 
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can access this endpoint."
+        }), 403
 
-    payment.payment_status = status_data.status
-
-
-    db.commit()
-
-    db.refresh(payment)
-
-
-    return {
-
-        "message": "Payment status updated successfully",
-
-        "payment_id": payment.id,
-
-        "status": payment.payment_status
-
-    }
-
-
-
-# ==========================================
-# Verify Payment
-# ==========================================
-
-@router.get("/{payment_id}/verify")
-def verify_payment(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
-
-
-    if not payment:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
-
-
-    if payment.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-    if payment.payment_status == "paid":
-
-        message = "Payment completed successfully"
-
-
-    elif payment.payment_status == "failed":
-
-        message = "Payment failed"
-
-
-    else:
-
-        message = "Payment is still pending"
-
-
-
-    return {
-
-        "payment_id": payment.id,
-
-        "status": payment.payment_status,
-
-        "message": message
-
-    }
-
-
-
-# ==========================================
-# Refund Request
-# ==========================================
-
-@router.post("/{payment_id}/refund")
-def request_refund(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
-
-
-    if not payment:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
-
-
-    if payment.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="You cannot request refund"
-        )
-
-
-    if payment.payment_status != "paid":
-
-        raise HTTPException(
-            status_code=400,
-            detail="Refund available only for completed payments"
-        )
-
-
-    payment.payment_status = "refund_requested"
-
-
-    db.commit()
-
-
-    return {
-
-        "message": "Refund request submitted",
-
-        "payment_id": payment.id,
-
-        "status": payment.payment_status
-
-    }
-# ==========================================
-# Payment Analytics
-# ==========================================
-
-@router.get("/analytics/summary")
-def payment_analytics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Gives payment statistics.
-
-    Farmer:
-        - Earnings from orders
-
-    Customer:
-        - Spending summary
-    """
-
-
-    if current_user.role == "farmer":
-
-        orders = db.query(Order).filter(
-            Order.farmer_id == current_user.id
-        ).all()
-
-
-        order_ids = [
-            order.id
-            for order in orders
-        ]
-
-
-        payments = db.query(Payment).filter(
-            Payment.order_id.in_(order_ids)
-        ).all()
-
-
-    elif current_user.role == "customer":
-
-        payments = db.query(Payment).filter(
-            Payment.customer_id == current_user.id
-        ).all()
-
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid user role"
-        )
-
-
-    total_transactions = len(payments)
-
-
-    completed = len([
-        payment
-        for payment in payments
-        if payment.payment_status == "paid"
-    ])
-
-
-    pending = len([
-        payment
-        for payment in payments
-        if payment.payment_status == "pending"
-    ])
-
-
-    total_amount = sum(
-        payment.amount
-        for payment in payments
-        if payment.payment_status == "paid"
+    payments = (
+        Payment.query
+        .join(Order, Payment.order_id == Order.order_id)
+        .filter(Order.customer_id == user.customer_id)
+        .order_by(Payment.payment_date.desc())
+        .all()
     )
 
-
-    return {
-
-        "total_transactions": total_transactions,
-
-        "completed_transactions": completed,
-
-        "pending_transactions": pending,
-
-        "total_amount": total_amount
-
-    }
-
-
-
-# ==========================================
-# Filter Payments
-# ==========================================
-
-@router.get("/filter")
-def filter_payments(
-    status: str = None,
-    method: str = None,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    query = db.query(Payment)
-
-
-    if current_user.role == "customer":
-
-        query = query.filter(
-            Payment.customer_id == current_user.id
-        )
-
-
-    elif current_user.role == "farmer":
-
-        farmer_orders = db.query(Order).filter(
-            Order.farmer_id == current_user.id
-        ).all()
-
-
-        order_ids = [
-            order.id
-            for order in farmer_orders
-        ]
-
-
-        query = query.filter(
-            Payment.order_id.in_(order_ids)
-        )
-
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-    if status:
-
-        query = query.filter(
-            Payment.payment_status == status
-        )
-
-
-    if method:
-
-        query = query.filter(
-            Payment.payment_method == method
-        )
-
-
-    payments = query.all()
-
-
-    result = []
-
-
-    for payment in payments:
-
-        result.append({
-
-            "payment_id": payment.id,
-
-            "order_id": payment.order_id,
-
-            "amount": payment.amount,
-
-            "method": payment.payment_method,
-
-            "status": payment.payment_status
-
-        })
-
-
-    return {
-
-        "count": len(result),
-
-        "payments": result
-
-    }
-
-
-
-# ==========================================
-# Transaction Report
-# ==========================================
-
-@router.get("/report")
-def transaction_report(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    payments = db.query(Payment).filter(
-        Payment.customer_id == current_user.id
-    ).all()
-
-
-    report = []
-
-
-    for payment in payments:
-
-        report.append({
-
-            "transaction_id": payment.id,
-
-            "order_id": payment.order_id,
-
-            "amount": payment.amount,
-
-            "status": payment.payment_status,
-
-            "date": payment.created_at
-
-        })
-
-
-    return {
-
-        "generated_for": current_user.id,
-
-        "transactions": report
-
-    }
-# ==========================================
-# Payment Gateway Initialization
-# ==========================================
-
-@router.post("/{payment_id}/gateway")
-def initiate_gateway_payment(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Placeholder for payment gateway integration.
-
-    Future integration:
-        - Razorpay
-        - Stripe
-        - PayPal
-
-    Currently creates a transaction reference.
-    """
-
-
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
-
-
-    if not payment:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
-
-
-    if payment.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-    transaction_reference = (
-        f"AGRICONNECT_TXN_{payment.id}"
+    return jsonify({
+        "success": True,
+        "count": len(payments),
+        "payments": [serialize_payment(p) for p in payments]
+    }), 200
+
+
+# ==========================================================
+# List Payments -- Farmer's Orders
+# ==========================================================
+
+@payment_bp.route("/farmer", methods=["GET"])
+@jwt_required()
+def farmer_payments():
+
+    user_type, user = current_user()
+
+    if user_type != "farmer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only farmers can access this endpoint."
+        }), 403
+
+    payments = (
+        Payment.query
+        .join(Order, Payment.order_id == Order.order_id)
+        .filter(Order.farmer_id == user.farmer_id)
+        .order_by(Payment.payment_date.desc())
+        .all()
     )
 
-
-    return {
-
-        "message": "Payment gateway initialized",
-
-        "payment_id": payment.id,
-
-        "transaction_reference":
-            transaction_reference,
-
-        "amount": payment.amount,
-
-        "status": "pending"
-
-    }
+    return jsonify({
+        "success": True,
+        "count": len(payments),
+        "payments": [serialize_payment(p) for p in payments]
+    }), 200
 
 
+# ==========================================================
+# Blueprint Health Check
+# ==========================================================
 
-# ==========================================
-# Payment Success Notification
-# ==========================================
-
-@router.post("/{payment_id}/success")
-def payment_success(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
-
-
-    if not payment:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
-
-
-    if payment.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-    payment.payment_status = "paid"
-
-
-    db.commit()
-
-
-    # Notification system hook
-    # Future:
-    # notify farmer about successful payment
-
-
-    return {
-
-        "message":
-        "Payment completed successfully",
-
-        "payment_id":
-        payment.id,
-
-        "status":
-        payment.payment_status
-
-    }
-
-
-
-# ==========================================
-# Payment Failure Handler
-# ==========================================
-
-@router.post("/{payment_id}/failed")
-def payment_failed(
-    payment_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    payment = db.query(Payment).filter(
-        Payment.id == payment_id
-    ).first()
-
-
-    if not payment:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Payment not found"
-        )
-
-
-    payment.payment_status = "failed"
-
-
-    db.commit()
-
-
-    return {
-
-        "message":
-        "Payment marked as failed",
-
-        "payment_id":
-        payment.id,
-
-        "status":
-        payment.payment_status
-
-    }
-
-
-
-# ==========================================
-# Payment Module Status
-# ==========================================
-
-@router.get("/")
+@payment_bp.route("/status/ping", methods=["GET"])
 def payment_home():
-
-    return {
-
-        "module":
-        "Payment Management",
-
-        "status":
-        "active",
-
-        "features": [
-
-            "Create Payment",
-
-            "Track Transactions",
-
-            "Payment Verification",
-
-            "Refund Requests",
-
-            "Revenue Analytics",
-
-            "Gateway Ready"
-
-        ]
-
-    }
+    return jsonify({
+        "success": True,
+        "blueprint": "payment",
+        "status": "active"
+    }), 200

@@ -18,6 +18,8 @@ Features
 - Order statistics
 """
 
+from datetime import datetime
+
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import (
     jwt_required,
@@ -31,8 +33,6 @@ from models import (
     Quotation,
     Farmer,
     Customer,
-    # If you have a Notification model, uncomment the next line:
-    # Notification,
 )
 
 order_bp = Blueprint(
@@ -130,24 +130,6 @@ def serialize_order(order):
     }
 
 
-def create_order_notification(user_id, message):
-    """
-    Helper to create a notification record.
-    Requires a Notification model imported from models.py
-    with fields: user_id, message, is_read.
-    """
-    from models import Notification  # local import to avoid hard dependency
-
-    notification = Notification(
-        user_id=user_id,
-        message=message,
-        is_read=False
-    )
-
-    db.session.add(notification)
-    db.session.commit()
-
-
 # ==========================================================
 # Get Order By ID
 # ==========================================================
@@ -202,10 +184,8 @@ def get_order(order_id):
         "success": True,
         "order": serialize_order(order)
     }), 200
-
-
 # ==========================================================
-# Customer Orders (supports optional ?status= filter)
+# Customer Orders
 # ==========================================================
 
 @order_bp.route("/customer", methods=["GET"])
@@ -213,7 +193,6 @@ def get_order(order_id):
 def customer_orders():
     """
     Return all orders of the logged-in customer.
-    Optional query param: ?status=Delivered
     """
 
     user_type, user = current_user()
@@ -224,14 +203,12 @@ def customer_orders():
             "message": "Only customers can access this endpoint."
         }), 403
 
-    status = request.args.get("status")
-
-    query = Order.query.filter_by(customer_id=user.customer_id)
-
-    if status:
-        query = query.filter_by(order_status=status)
-
-    orders = query.order_by(Order.order_date.desc()).all()
+    orders = (
+        Order.query
+        .filter_by(customer_id=user.customer_id)
+        .order_by(Order.order_date.desc())
+        .all()
+    )
 
     return jsonify({
         "success": True,
@@ -244,7 +221,7 @@ def customer_orders():
 
 
 # ==========================================================
-# Farmer Orders (supports optional ?status= filter)
+# Farmer Orders
 # ==========================================================
 
 @order_bp.route("/farmer", methods=["GET"])
@@ -252,7 +229,6 @@ def customer_orders():
 def farmer_orders():
     """
     Return all orders of the logged-in farmer.
-    Optional query param: ?status=Packed
     """
 
     user_type, user = current_user()
@@ -263,14 +239,12 @@ def farmer_orders():
             "message": "Only farmers can access this endpoint."
         }), 403
 
-    status = request.args.get("status")
-
-    query = Order.query.filter_by(farmer_id=user.farmer_id)
-
-    if status:
-        query = query.filter_by(order_status=status)
-
-    orders = query.order_by(Order.order_date.desc()).all()
+    orders = (
+        Order.query
+        .filter_by(farmer_id=user.farmer_id)
+        .order_by(Order.order_date.desc())
+        .all()
+    )
 
     return jsonify({
         "success": True,
@@ -376,12 +350,21 @@ def create_order():
 # Update Order Status (Farmer)
 # ==========================================================
 
+VALID_STATUS_TRANSITIONS = {
+    "Requested": ["Accepted", "Rejected"],
+    "Accepted": ["Packed", "Cancelled"],
+    "Packed": ["Out for Delivery", "Cancelled"],
+    "Out for Delivery": ["Delivered"],
+}
+
+
 @order_bp.route("/<int:order_id>/status", methods=["PUT"])
 @jwt_required()
 def update_order_status(order_id):
     """
-    Farmer updates order status:
+    Farmer moves an order through its lifecycle:
     Requested -> Accepted -> Packed -> Out for Delivery -> Delivered
+    (or Rejected / Cancelled at the allowed points).
     """
 
     user_type, user = current_user()
@@ -403,27 +386,45 @@ def update_order_status(order_id):
     if order.farmer_id != user.farmer_id:
         return jsonify({
             "success": False,
-            "message": "You cannot modify this order."
+            "message": "You do not own this order."
         }), 403
 
     data = request.get_json(silent=True) or {}
-    new_status = data.get("status")
+    new_status = data.get("order_status")
 
     if new_status not in VALID_ORDER_STATUS:
         return jsonify({
             "success": False,
-            "message": "Invalid order status."
+            "message": f"Invalid order_status. Must be one of {VALID_ORDER_STATUS}."
+        }), 400
+
+    allowed_next = VALID_STATUS_TRANSITIONS.get(order.order_status, [])
+
+    if new_status not in allowed_next:
+        return jsonify({
+            "success": False,
+            "message": f"Cannot move order from '{order.order_status}' to '{new_status}'."
         }), 400
 
     order.order_status = new_status
+
+    if new_status == "Packed":
+        order.packed_date = datetime.utcnow()
+    elif new_status == "Out for Delivery":
+        order.shipped_date = datetime.utcnow()
+    elif new_status == "Delivered":
+        order.delivered_date = datetime.utcnow()
+        order.customer.successful_orders += 1
+        order.customer.total_orders += 1
+    elif new_status == "Cancelled":
+        order.customer.cancelled_orders += 1
 
     db.session.commit()
 
     return jsonify({
         "success": True,
-        "message": "Order status updated successfully.",
-        "order_id": order.order_id,
-        "status": order.order_status
+        "message": "Order status updated.",
+        "order": serialize_order(order)
     }), 200
 
 
@@ -435,8 +436,8 @@ def update_order_status(order_id):
 @jwt_required()
 def cancel_order(order_id):
     """
-    Customer cancels their own order, unless it has
-    already shipped or been delivered.
+    Customer cancels an order, only while it is still
+    Requested or Accepted (not yet shipped).
     """
 
     user_type, user = current_user()
@@ -461,115 +462,120 @@ def cancel_order(order_id):
             "message": "This is not your order."
         }), 403
 
-    if order.order_status in ("Out for Delivery", "Delivered"):
+    if order.order_status in ("Out for Delivery", "Delivered", "Cancelled"):
         return jsonify({
             "success": False,
-            "message": "Cannot cancel a shipped or delivered order."
+            "message": f"Cannot cancel an order that is already '{order.order_status}'."
         }), 400
 
     order.order_status = "Cancelled"
-
+    user.cancelled_orders += 1
     db.session.commit()
 
     return jsonify({
         "success": True,
-        "message": "Order cancelled successfully."
+        "message": "Order cancelled successfully.",
+        "order": serialize_order(order)
     }), 200
 
 
 # ==========================================================
-# Order Statistics
+# Order Statistics (for logged-in farmer or customer)
 # ==========================================================
 
 @order_bp.route("/stats/summary", methods=["GET"])
 @jwt_required()
 def order_statistics():
     """
-    Return order counts for the logged-in user.
+    Return simple order counts for whichever user is logged in.
     """
 
     user_type, user = current_user()
 
-    if user_type == "farmer" and user is not None:
-        orders = Order.query.filter_by(farmer_id=user.farmer_id).all()
-    elif user_type == "customer" and user is not None:
-        orders = Order.query.filter_by(customer_id=user.customer_id).all()
-    else:
+    if user is None:
         return jsonify({
             "success": False,
-            "message": "Invalid user role."
+            "message": "Unauthorized."
         }), 403
+
+    if user_type == "farmer":
+        orders = Order.query.filter_by(farmer_id=user.farmer_id).all()
+    else:
+        orders = Order.query.filter_by(customer_id=user.customer_id).all()
 
     total = len(orders)
     pending = len([o for o in orders if o.order_status == "Requested"])
-    completed = len([o for o in orders if o.order_status == "Delivered"])
+    delivered = len([o for o in orders if o.order_status == "Delivered"])
+    cancelled = len([o for o in orders if o.order_status == "Cancelled"])
 
     return jsonify({
         "success": True,
         "total_orders": total,
         "pending_orders": pending,
-        "completed_orders": completed
+        "delivered_orders": delivered,
+        "cancelled_orders": cancelled
     }), 200
 
 
 # ==========================================================
-# Search Orders
+# Search Orders (within the logged-in user's own orders)
 # ==========================================================
 
 @order_bp.route("/search", methods=["GET"])
 @jwt_required()
 def search_orders():
     """
-    Search the logged-in user's orders by keyword,
-    matching against order status or order id.
+    Search the logged-in user's own orders by order_status
+    or order_id. Query param: ?keyword=
     """
 
     user_type, user = current_user()
 
-    keyword = request.args.get("keyword", "")
-
-    if user_type == "farmer" and user is not None:
-        query = Order.query.filter_by(farmer_id=user.farmer_id)
-    elif user_type == "customer" and user is not None:
-        query = Order.query.filter_by(customer_id=user.customer_id)
-    else:
+    if user is None:
         return jsonify({
             "success": False,
-            "message": "Access denied."
+            "message": "Unauthorized."
         }), 403
+
+    keyword = (request.args.get("keyword") or "").strip().lower()
+
+    if user_type == "farmer":
+        query = Order.query.filter_by(farmer_id=user.farmer_id)
+    else:
+        query = Order.query.filter_by(customer_id=user.customer_id)
 
     orders = query.all()
 
-    matched_orders = [
-        serialize_order(order)
-        for order in orders
-        if keyword.lower() in str(order.order_id).lower()
-        or keyword.lower() in order.order_status.lower()
-    ]
+    if keyword:
+        orders = [
+            o for o in orders
+            if keyword in o.order_status.lower() or keyword == str(o.order_id)
+        ]
 
     return jsonify({
         "success": True,
-        "results": matched_orders
+        "count": len(orders),
+        "orders": [serialize_order(o) for o in orders]
     }), 200
 
 
 # ==========================================================
-# Update Payment Status
+# Update Payment Status (denormalized flag on Order)
 # ==========================================================
+# Note: the detailed transaction record lives in the Payment
+# table (see routes/payment.py). This just keeps Order.payment_status
+# in sync for quick dashboard reads.
 
-@order_bp.route("/<int:order_id>/payment", methods=["PUT"])
+@order_bp.route("/<int:order_id>/payment-status", methods=["PUT"])
 @jwt_required()
 def update_payment_status(order_id):
-    """
-    Customer updates the payment status of their order.
-    """
 
     user_type, user = current_user()
 
-    if user_type != "customer" or user is None:
+    if user is None:
         return jsonify({
             "success": False,
-            "message": "Only customers can update payment status."
+            "message": "Unauthorized."
         }), 403
 
     order = Order.query.filter_by(order_id=order_id).first()
@@ -580,41 +586,43 @@ def update_payment_status(order_id):
             "message": "Order not found."
         }), 404
 
-    if order.customer_id != user.customer_id:
+    if (
+        (user_type == "customer" and order.customer_id != user.customer_id)
+        or (user_type == "farmer" and order.farmer_id != user.farmer_id)
+    ):
         return jsonify({
             "success": False,
-            "message": "Only the order's customer can update payment."
+            "message": "Access denied."
         }), 403
 
     data = request.get_json(silent=True) or {}
-    new_status = data.get("status")
+    new_status = data.get("payment_status")
 
     if new_status not in VALID_PAYMENT_STATUS:
         return jsonify({
             "success": False,
-            "message": "Invalid payment status."
+            "message": f"Invalid payment_status. Must be one of {VALID_PAYMENT_STATUS}."
         }), 400
 
     order.payment_status = new_status
-
     db.session.commit()
 
     return jsonify({
         "success": True,
         "message": "Payment status updated.",
-        "order_id": order.order_id,
-        "payment_status": order.payment_status
+        "order": serialize_order(order)
     }), 200
 
 
 # ==========================================================
-# Final Router Check
+# Blueprint Health Check
 # ==========================================================
 
 @order_bp.route("/", methods=["GET"])
 def order_home():
     return jsonify({
-        "module": "Order Management",
+        "success": True,
+        "blueprint": "order",
         "status": "active",
         "features": [
             "Create Orders",
@@ -623,5 +631,6 @@ def order_home():
             "Cancel Orders",
             "Payment Tracking",
             "Order History",
+            "Search & Statistics"
         ]
     }), 200

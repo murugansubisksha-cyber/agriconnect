@@ -20,6 +20,14 @@ from flask_jwt_extended import JWTManager
 from auth import BLOCKLIST, auth_bp
 from config import config_by_name
 from database import db
+from routes.product import product_bp
+from routes.farmer import farmer_bp
+from routes.customer import customer_bp
+from routes.order import order_bp
+from routes.quotation import quotation_bp
+from routes.payment import payment_bp
+from routes.review import review_bp
+from routes.chatbot import chatbot_bp
 
 
 def create_app(env: str = None) -> Flask:
@@ -61,6 +69,14 @@ def create_app(env: str = None) -> Flask:
 
     # --- Register blueprints ---
     app.register_blueprint(auth_bp)
+    app.register_blueprint(product_bp)
+    app.register_blueprint(farmer_bp)
+    app.register_blueprint(customer_bp)
+    app.register_blueprint(order_bp)
+    app.register_blueprint(quotation_bp)
+    app.register_blueprint(payment_bp)
+    app.register_blueprint(review_bp)
+    app.register_blueprint(chatbot_bp)
 
     # --- Simple health check route ---
     @app.route("/api/health", methods=["GET"])

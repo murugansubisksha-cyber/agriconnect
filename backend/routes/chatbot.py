@@ -2,1246 +2,243 @@
 chatbot.py
 ==========
 
-AgriConnect Farmer-Buyer Communication Assistant.
+Farmer <-> Buyer direct-messaging routes for AgriConnect (Flask).
 
 Purpose:
-    - Remove middleman
-    - Connect farmers and buyers directly
-    - Assist marketplace conversations
-    - Support negotiation and communication
+    - Remove the middleman: let farmers and customers message each
+      other directly, optionally scoped to a specific order.
 
 Features:
-    - Farmer-buyer chat
-    - Message history
-    - AI communication assistance
-    - Future Tamil voice integration
+    - Send a message
+    - View a conversation thread with a specific other user
+    - Inbox: list conversation partners with their last message
+    - Mark messages as read
 """
 
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
+from sqlalchemy import or_
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from database import db
+from models import Chat, Customer, Farmer
 
-from backend.database import get_db
-from backend.models import ChatHistory
-
-from backend.schemas import ChatRequest
-
-from backend.auth import get_current_user
-
-
-
-router = APIRouter(
-    prefix="/chatbot",
-    tags=["Chatbot"]
+chatbot_bp = Blueprint(
+    "chatbot",
+    __name__,
+    url_prefix="/api/chat"
 )
 
 
+# ==========================================================
+# Helper Functions
+# ==========================================================
 
-# ==========================================
-# Marketplace Communication Assistant
-# ==========================================
+def current_user():
+    """Return (user_type, user_object) for the logged-in JWT identity."""
 
-def generate_chat_assistance(message: str):
+    claims = get_jwt()
+    user_type = claims.get("user_type")
+    user_id = int(get_jwt_identity())
 
-    """
-    Basic marketplace assistant.
+    if user_type == "farmer":
+        return user_type, Farmer.query.filter_by(
+            farmer_id=user_id, active_status=True
+        ).first()
 
-    Future integration:
-        - LLM model
-        - Tamil language model
-        - Voice assistant
-    """
+    if user_type == "customer":
+        return user_type, Customer.query.filter_by(
+            customer_id=user_id, active_status=True
+        ).first()
 
-
-    msg = message.lower()
-
-
-
-    if "price" in msg or "rate" in msg:
-
-        return (
-            "You can discuss price with the buyer. "
-            "Confirm quantity, quality requirements, "
-            "delivery location and payment terms."
-        )
+    return None, None
 
 
-    elif "quantity" in msg:
-
-        return (
-            "Please confirm required quantity "
-            "before finalizing the agreement."
-        )
-
-
-    elif "payment" in msg:
-
-        return (
-            "Confirm payment method and payment timeline "
-            "before completing the transaction."
-        )
-
-
-    elif "delivery" in msg:
-
-        return (
-            "Discuss delivery location, transport "
-            "responsibility and expected delivery date."
-        )
+def serialize_chat(chat):
+    return {
+        "message_id": chat.message_id,
+        "sender_id": chat.sender_id,
+        "sender_type": chat.sender_type,
+        "receiver_id": chat.receiver_id,
+        "receiver_type": chat.receiver_type,
+        "order_id": chat.order_id,
+        "message": chat.message,
+        "attachment": chat.attachment,
+        "sent_time": chat.sent_time.isoformat() if chat.sent_time else None,
+        "read_status": chat.read_status,
+    }
 
 
+def other_type(user_type):
+    return "customer" if user_type == "farmer" else "farmer"
+
+
+# ==========================================================
+# Send Message
+# ==========================================================
+
+@chatbot_bp.route("/send", methods=["POST"])
+@jwt_required()
+def send_message():
+
+    user_type, user = current_user()
+
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
+
+    data = request.get_json(silent=True) or {}
+
+    receiver_id = data.get("receiver_id")
+    message = data.get("message")
+
+    if not receiver_id or not message:
+        return jsonify({
+            "success": False,
+            "message": "receiver_id and message are required."
+        }), 400
+
+    receiver_type = other_type(user_type)
+
+    if receiver_type == "farmer":
+        receiver_exists = Farmer.query.filter_by(farmer_id=receiver_id).first()
     else:
+        receiver_exists = Customer.query.filter_by(customer_id=receiver_id).first()
 
-        return (
-            "You can directly communicate with the buyer. "
-            "Discuss product details, quantity, price, "
-            "delivery and payment terms."
-        )
+    if receiver_exists is None:
+        return jsonify({"success": False, "message": "Recipient not found."}), 404
 
+    sender_id = user.farmer_id if user_type == "farmer" else user.customer_id
 
-
-# ==========================================
-# Start Conversation
-# ==========================================
-
-@router.post("/")
-def create_chat(
-    chat_data: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Farmer or buyer starts communication.
-    """
-
-
-    if current_user.role not in [
-        "farmer",
-        "customer"
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers and customers can chat"
-        )
-
-
-
-    response = generate_chat_assistance(
-        chat_data.message
+    chat = Chat(
+        sender_id=sender_id,
+        sender_type=user_type,
+        receiver_id=receiver_id,
+        receiver_type=receiver_type,
+        order_id=data.get("order_id"),
+        message=message,
+        attachment=data.get("attachment"),
     )
 
+    db.session.add(chat)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Message sent.",
+        "chat": serialize_chat(chat)
+    }), 201
 
 
-    chat = ChatHistory(
+# ==========================================================
+# Conversation Thread With a Specific Other User
+# ==========================================================
 
-        user_id=current_user.id,
+@chatbot_bp.route("/conversation/<int:other_id>", methods=["GET"])
+@jwt_required()
+def conversation(other_id):
+    """
+    Full message thread between the logged-in user and one other
+    user (the other role is inferred automatically -- a farmer
+    always talks to customers and vice versa).
+    """
 
-        user_message=chat_data.message,
+    user_type, user = current_user()
 
-        bot_response=response
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
 
+    my_id = user.farmer_id if user_type == "farmer" else user.customer_id
+    other_role = other_type(user_type)
+
+    messages = (
+        Chat.query
+        .filter(
+            or_(
+                (Chat.sender_id == my_id) & (Chat.sender_type == user_type)
+                & (Chat.receiver_id == other_id) & (Chat.receiver_type == other_role),
+                (Chat.sender_id == other_id) & (Chat.sender_type == other_role)
+                & (Chat.receiver_id == my_id) & (Chat.receiver_type == user_type),
+            )
+        )
+        .order_by(Chat.sent_time.asc())
+        .all()
     )
 
+    # Mark incoming messages in this thread as read
+    for m in messages:
+        if m.receiver_id == my_id and m.receiver_type == user_type and not m.read_status:
+            m.read_status = True
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "count": len(messages),
+        "messages": [serialize_chat(m) for m in messages]
+    }), 200
 
 
-    db.add(chat)
+# ==========================================================
+# Inbox -- List of Conversation Partners
+# ==========================================================
 
-    db.commit()
+@chatbot_bp.route("/inbox", methods=["GET"])
+@jwt_required()
+def inbox():
 
-    db.refresh(chat)
+    user_type, user = current_user()
 
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
 
+    my_id = user.farmer_id if user_type == "farmer" else user.customer_id
 
-    return {
-
-        "message":
-        "Message processed successfully",
-
-        "chat_id":
-        chat.id,
-
-        "user_message":
-        chat.user_message,
-
-        "assistant_response":
-        response
-
-    }
-# ==========================================
-# Create Farmer-Buyer Conversation
-# ==========================================
-
-@router.post("/conversation")
-def create_conversation(
-    buyer_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Creates direct communication channel
-    between farmer and buyer.
-    """
-
-
-    if current_user.role not in [
-        "farmer",
-        "customer"
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers and customers can create conversations"
+    messages = (
+        Chat.query
+        .filter(
+            or_(
+                (Chat.sender_id == my_id) & (Chat.sender_type == user_type),
+                (Chat.receiver_id == my_id) & (Chat.receiver_type == user_type),
+            )
         )
-
-
-
-    conversation = ChatHistory(
-
-        sender_id=current_user.id,
-
-        receiver_id=buyer_id,
-
-        message_type="text",
-
-        message="Conversation started"
-
+        .order_by(Chat.sent_time.desc())
+        .all()
     )
 
-
-
-    db.add(conversation)
-
-    db.commit()
-
-    db.refresh(conversation)
-
-
-
-    return {
-
-        "message":
-        "Conversation created",
-
-        "conversation_id":
-        conversation.id
-
-    }
-
-
-
-# ==========================================
-# Send Direct Message
-# ==========================================
-
-@router.post("/conversation/{conversation_id}/message")
-def send_message(
-    conversation_id: int,
-    chat_data: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Farmer and buyer exchange messages.
-    """
-
-
-    if current_user.role not in [
-        "farmer",
-        "customer"
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid user"
-        )
-
-
-
-    message = ChatHistory(
-
-        conversation_id=conversation_id,
-
-        sender_id=current_user.id,
-
-        message=chat_data.message,
-
-        message_type="text"
-
-    )
-
-
-
-    db.add(message)
-
-    db.commit()
-
-    db.refresh(message)
-
-
-
-    return {
-
-        "message":
-        "Message sent",
-
-        "message_id":
-        message.id
-
-    }
-
-
-
-# ==========================================
-# View Inbox
-# ==========================================
-
-@router.get("/inbox")
-def chat_inbox(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Shows user's active conversations.
-    """
-
-
-    conversations = db.query(ChatHistory).filter(
-        (
-            ChatHistory.sender_id == current_user.id
-        )
-        |
-        (
-            ChatHistory.receiver_id == current_user.id
-        )
-    ).order_by(
-        ChatHistory.created_at.desc()
-    ).all()
-
-
-
-    result = []
-
-
-    for chat in conversations:
-
-        result.append({
-
-            "conversation_id":
-            chat.conversation_id,
-
-            "sender_id":
-            chat.sender_id,
-
-            "receiver_id":
-            chat.receiver_id,
-
-            "last_message":
-            chat.message,
-
-            "time":
-            chat.created_at
-
-        })
-
-
-
-    return {
-
-        "total":
-        len(result),
-
-        "conversations":
-        result
-
-    }
-
-
-
-# ==========================================
-# View Conversation Messages
-# ==========================================
-
-@router.get("/conversation/{conversation_id}")
-def get_conversation(
-    conversation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    messages = db.query(ChatHistory).filter(
-        ChatHistory.conversation_id ==
-        conversation_id
-    ).order_by(
-        ChatHistory.created_at.asc()
-    ).all()
-
-
-
-    if not messages:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Conversation not found"
-        )
-
-
-
-    result = []
-
-
-
-    for message in messages:
-
-        result.append({
-
-            "sender_id":
-            message.sender_id,
-
-            "message":
-            message.message,
-
-            "type":
-            message.message_type,
-
-            "time":
-            message.created_at
-
-        })
-
-
-
-    return {
-
-        "conversation_id":
-        conversation_id,
-
-        "messages":
-        result
-
-    }
-# ==========================================
-# Language Detection
-# ==========================================
-
-def detect_language(message: str):
-
-    """
-    Detects user language.
-
-    Future integration:
-        - AI language detector
-        - Tamil NLP model
-    """
-
-
-    tamil_chars = 0
-
-
-    for char in message:
-
-        if "\u0B80" <= char <= "\u0BFF":
-
-            tamil_chars += 1
-
-
-
-    if tamil_chars > 0:
-
-        return "tamil"
-
-
-    return "english"
-
-
-
-# ==========================================
-# Translate Farmer-Buyer Message
-# ==========================================
-
-def translate_message(
-    message: str,
-    target_language: str
-):
-
-    """
-    Translation layer.
-
-    Future:
-        - Google Translate API
-        - Indic NLP
-        - Custom Tamil model
-    """
-
-
-    # Placeholder response
-
-    return message
-
-
-
-# ==========================================
-# Send Multilingual Message
-# ==========================================
-
-@router.post(
-    "/conversation/{conversation_id}/multilingual"
-)
-def send_multilingual_message(
-    conversation_id: int,
-    chat_data: ChatRequest,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Handles Tamil/English messages
-    between farmer and buyer.
-    """
-
-
-    language = detect_language(
-        chat_data.message
-    )
-
-
-
-    translated_text = translate_message(
-        chat_data.message,
-        "english"
-    )
-
-
-
-    message = ChatHistory(
-
-        conversation_id=conversation_id,
-
-        sender_id=current_user.id,
-
-        message=translated_text,
-
-        original_message=chat_data.message,
-
-        language=language,
-
-        message_type="text"
-
-    )
-
-
-
-    db.add(message)
-
-    db.commit()
-
-    db.refresh(message)
-
-
-
-    return {
-
-        "message":
-        "Multilingual message sent",
-
-        "detected_language":
-        language,
-
-        "original":
-        chat_data.message,
-
-        "translated":
-        translated_text
-
-    }
-
-
-
-# ==========================================
-# Voice Message Upload
-# ==========================================
-
-@router.post(
-    "/conversation/{conversation_id}/voice"
-)
-def send_voice_message(
-    conversation_id: int,
-    audio_file: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Voice communication between farmer
-    and buyer.
-
-    Future integration:
-        - Whisper speech recognition
-        - Tamil speech model
-        - Text-to-speech
-    """
-
-
-
-    # Placeholder transcription
-
-    transcript = (
-        "Voice message transcription will "
-        "be generated here"
-    )
-
-
-
-    message = ChatHistory(
-
-        conversation_id=conversation_id,
-
-        sender_id=current_user.id,
-
-        message=transcript,
-
-        message_type="voice",
-
-        audio_path=audio_file
-
-    )
-
-
-
-    db.add(message)
-
-    db.commit()
-
-    db.refresh(message)
-
-
-
-    return {
-
-        "message":
-        "Voice message received",
-
-        "transcript":
-        transcript,
-
-        "message_id":
-        message.id
-
-    }
-
-
-
-# ==========================================
-# Voice Response Generator
-# ==========================================
-
-def generate_voice_response(
-    text: str,
-    language="tamil"
-):
-
-    """
-    Converts chatbot response into voice.
-
-    Future:
-        - Text To Speech API
-        - Tamil voice model
-    """
-
-
-    return {
-
-        "text":
-        text,
-
-        "audio":
-        "generated_audio_file_path"
-
-    }
-
-
-
-# ==========================================
-# Convert Message To Voice
-# ==========================================
-
-@router.post(
-    "/voice-response"
-)
-def voice_response(
-    text: str,
-    language: str = "tamil"
-):
-
-
-    response = generate_voice_response(
-        text,
-        language
-    )
-
-
-    return {
-
-        "language":
-        language,
-
-        "response":
-        response
-
-    }
-# ==========================================
-# Quotation Discussion Assistant
-# ==========================================
-
-def quotation_assistance(message: str):
-
-    """
-    Helps users during quotation discussion.
-
-    Future integration:
-        - LLM negotiation model
-        - Market intelligence service
-    """
-
-
-    msg = message.lower()
-
-
-
-    if "price" in msg or "rate" in msg:
-
-        return {
-
-            "advice":
-
-            [
-                "Confirm product quality requirements",
-                "Discuss quantity before finalizing price",
-                "Compare payment terms"
-            ]
-
-        }
-
-
-
-    elif "payment" in msg:
-
-        return {
-
-            "advice":
-
-            [
-                "Confirm payment method",
-                "Confirm payment timeline",
-                "Avoid unclear payment agreements"
-            ]
-
-        }
-
-
-
-    elif "delivery" in msg:
-
-        return {
-
-            "advice":
-
-            [
-                "Confirm delivery location",
-                "Decide transport responsibility",
-                "Confirm delivery date"
-            ]
-
-        }
-
-
-
-    else:
-
-        return {
-
-            "advice":
-
-            [
-                "Confirm product details",
-                "Confirm quantity",
-                "Confirm price",
-                "Confirm payment",
-                "Confirm delivery"
-            ]
-
-        }
-
-
-
-# ==========================================
-# Analyze Quotation Conversation
-# ==========================================
-
-@router.post(
-    "/quotation-assistant"
-)
-def quotation_chat_assistant(
-    chat_data: ChatRequest,
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Gives transaction guidance during
-    farmer-buyer negotiation.
-    """
-
-
-    if current_user.role not in [
-        "farmer",
-        "customer"
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only marketplace users allowed"
-        )
-
-
-
-    result = quotation_assistance(
-        chat_data.message
-    )
-
-
-
-    return {
-
-        "user_message":
-        chat_data.message,
-
-        "assistant":
-        result
-
-    }
-
-
-
-# ==========================================
-# Buyer Requirement Checklist
-# ==========================================
-
-@router.get("/buyer-checklist")
-def buyer_requirement_checklist():
-
-    """
-    Checklist before buyer confirms order.
-    """
-
-
-    return {
-
-        "requirements":
-
-        [
-
-            "Product name",
-
-            "Required quantity",
-
-            "Quality specification",
-
-            "Delivery location",
-
-            "Required delivery date",
-
-            "Payment method",
-
-            "Special requirements"
-
-        ]
-
-    }
-
-
-
-# ==========================================
-# Farmer Negotiation Checklist
-# ==========================================
-
-@router.get("/farmer-negotiation-checklist")
-def farmer_negotiation_checklist():
-
-    """
-    Things farmer should confirm
-    before accepting buyer offer.
-    """
-
-
-    return {
-
-        "check_before_accepting":
-
-        [
-
-            "Buyer identity verification",
-
-            "Final price",
-
-            "Quantity confirmation",
-
-            "Payment timeline",
-
-            "Transport responsibility",
-
-            "Delivery conditions"
-
-        ]
-
-    }
-
-
-
-# ==========================================
-# Smart Conversation Summary
-# ==========================================
-
-@router.get(
-    "/conversation/{conversation_id}/summary"
-)
-def conversation_summary(
-    conversation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    messages = db.query(ChatHistory).filter(
-        ChatHistory.conversation_id ==
-        conversation_id
-    ).all()
-
-
-
-    if not messages:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Conversation not found"
-        )
-
-
-
-    summary = {
-
-        "product_discussed": None,
-
-        "quantity": None,
-
-        "price": None,
-
-        "payment_discussed": False,
-
-        "delivery_discussed": False
-
-    }
-
-
-
-    for message in messages:
-
-        text = message.message.lower()
-
-
-        if "kg" in text or "ton" in text:
-
-            summary["quantity"] = message.message
-
-
-        if "₹" in text or "price" in text:
-
-            summary["price"] = message.message
-
-
-        if "payment" in text:
-
-            summary["payment_discussed"] = True
-
-
-        if "delivery" in text:
-
-            summary["delivery_discussed"] = True
-
-
-
-    return {
-
-        "conversation_id":
-        conversation_id,
-
-        "summary":
-        summary
-
-    }
-# ==========================================
-# Transaction Safety Assistant
-# ==========================================
-
-def transaction_safety_check(message: str):
-
-    """
-    Identifies risky transaction situations.
-
-    Future:
-        - Fraud detection model
-        - Buyer verification system
-    """
-
-
-    warnings = []
-
-
-
-    msg = message.lower()
-
-
-
-    if "before delivery" in msg:
-
-        warnings.append(
-            "Confirm payment terms before delivering products."
-        )
-
-
-
-    if "advance" not in msg and "payment" not in msg:
-
-        warnings.append(
-            "Confirm payment agreement clearly."
-        )
-
-
-
-    if "unknown" in msg:
-
-        warnings.append(
-            "Verify buyer identity before transaction."
-        )
-
-
-
-    if not warnings:
-
-        warnings.append(
-            "No major communication risks detected."
-        )
-
-
-
-    return warnings
-
-
-
-# ==========================================
-# Transaction Safety Check API
-# ==========================================
-
-@router.post("/safety-check")
-def safety_check(
-    chat_data: ChatRequest,
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role not in [
-        "farmer",
-        "customer"
-    ]:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only marketplace users allowed"
-        )
-
-
-
-    result = transaction_safety_check(
-        chat_data.message
-    )
-
-
-
-    return {
-
-        "message":
-        chat_data.message,
-
-        "safety_notes":
-        result
-
-    }
-
-
-
-# ==========================================
-# Chat Analytics
-# ==========================================
-
-@router.get("/analytics")
-def chat_analytics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    messages = db.query(ChatHistory).filter(
-        ChatHistory.sender_id ==
-        current_user.id
-    ).all()
-
-
-
-    total_messages = len(messages)
-
-
-
-    voice_messages = len([
-        message
-        for message in messages
-        if message.message_type == "voice"
-    ])
-
-
-
-    text_messages = len([
-        message
-        for message in messages
-        if message.message_type == "text"
-    ])
-
-
-
-    return {
-
-        "user_id":
-        current_user.id,
-
-        "total_messages":
-        total_messages,
-
-        "text_messages":
-        text_messages,
-
-        "voice_messages":
-        voice_messages
-
-    }
-
-
-
-# ==========================================
-# Notification Hook
-# ==========================================
-
-def send_chat_notification(
-    receiver_id,
-    message
-):
-
-    """
-    Future connection:
-
-        notification.py
-
-    Examples:
-        - New buyer message
-        - New quotation discussion
-        - Payment confirmation
-    """
-
-
-    return {
-
-        "receiver":
-        receiver_id,
-
-        "notification":
-        message
-
-    }
-
-
-
-# ==========================================
-# Notify New Message
-# ==========================================
-
-@router.post(
-    "/conversation/{conversation_id}/notify"
-)
-def notify_message(
-    conversation_id: int,
-    receiver_id: int,
-    message: str
-):
-
-
-    notification = send_chat_notification(
-        receiver_id,
-        message
-    )
-
-
-    return {
-
-        "conversation_id":
-        conversation_id,
-
-        "notification":
-        notification
-
-    }
-
-
-
-# ==========================================
-# Chatbot Module Status
-# ==========================================
-
-@router.get("/")
+    conversations = {}
+    for m in messages:
+        if m.sender_id == my_id and m.sender_type == user_type:
+            partner_id = m.receiver_id
+        else:
+            partner_id = m.sender_id
+
+        if partner_id not in conversations:
+            unread = sum(
+                1 for x in messages
+                if x.sender_id == partner_id
+                and x.receiver_id == my_id
+                and not x.read_status
+            )
+            conversations[partner_id] = {
+                "partner_id": partner_id,
+                "last_message": m.message,
+                "last_message_time": m.sent_time.isoformat() if m.sent_time else None,
+                "unread_count": unread,
+            }
+
+    return jsonify({
+        "success": True,
+        "count": len(conversations),
+        "conversations": list(conversations.values())
+    }), 200
+
+
+# ==========================================================
+# Blueprint Health Check
+# ==========================================================
+
+@chatbot_bp.route("/status/ping", methods=["GET"])
 def chatbot_home():
-
-    return {
-
-        "module":
-        "Farmer Buyer Communication Assistant",
-
-        "status":
-        "active",
-
-        "purpose":
-        "Direct connection between farmers and buyers",
-
-        "features":
-
-        [
-
-            "Direct Farmer-Buyer Chat",
-
-            "Tamil Language Support",
-
-            "Voice Communication",
-
-            "Translation Support",
-
-            "Quotation Discussion",
-
-            "Negotiation Assistance",
-
-            "Transaction Safety",
-
-            "Conversation History"
-
-        ]
-
-    }
+    return jsonify({
+        "success": True,
+        "blueprint": "chatbot",
+        "status": "active"
+    }), 200

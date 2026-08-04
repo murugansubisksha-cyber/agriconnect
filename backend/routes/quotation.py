@@ -2,991 +2,461 @@
 quotation.py
 ============
 
-Quotation management routes for AgriConnect.
+Quotation management routes for AgriConnect (Flask).
 
 Features:
-    - Farmer creates quotation
-    - Customer receives quotation
-    - Accept/reject quotation
-    - Track quotation status
-    - Connect with orders
+    - Customer creates a quotation (offer) on a product
+    - AI advisory score generated automatically (never auto-decides)
+    - Farmer accepts/rejects the quotation
+    - Customer can withdraw a still-pending quotation
+    - View quotations by customer / by farmer
 """
 
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
-from backend.database import get_db
-from backend.models import Quotation, Product
-from backend.schemas import (
-    QuotationCreate,
-    QuotationStatusUpdate
-)
+from database import db
+from models import AIRecommendation, Customer, Farmer, Product, Quotation
 
-from backend.auth import get_current_user
-
-
-
-router = APIRouter(
-    prefix="/quotations",
-    tags=["Quotations"]
+quotation_bp = Blueprint(
+    "quotation",
+    __name__,
+    url_prefix="/api/quotations"
 )
 
 
+# ==========================================================
+# Constants
+# ==========================================================
 
-# ==========================================
-# Create Quotation (Farmer)
-# ==========================================
+VALID_QUOTATION_STATUS = (
+    "Pending",
+    "Accepted",
+    "Rejected",
+    "Expired",
+    "Withdrawn",
+)
 
-@router.post("/")
-def create_quotation(
-    quotation_data: QuotationCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
 
+# ==========================================================
+# Helper Functions
+# ==========================================================
+
+def current_user():
+    """Return (user_type, user_object) for the logged-in JWT identity."""
+
+    claims = get_jwt()
+    user_type = claims.get("user_type")
+    user_id = int(get_jwt_identity())
+
+    if user_type == "farmer":
+        return user_type, Farmer.query.filter_by(
+            farmer_id=user_id, active_status=True
+        ).first()
+
+    if user_type == "customer":
+        return user_type, Customer.query.filter_by(
+            customer_id=user_id, active_status=True
+        ).first()
+
+    return None, None
+
+
+def serialize_quotation(quotation):
+    """Convert a Quotation model into JSON."""
+
+    return {
+        "quotation_id": quotation.quotation_id,
+        "customer_id": quotation.customer_id,
+        "product_id": quotation.product_id,
+        "offered_price": quotation.offered_price,
+        "requested_quantity": quotation.requested_quantity,
+        "quotation_status": quotation.quotation_status,
+        "quotation_deadline": (
+            quotation.quotation_deadline.isoformat()
+            if quotation.quotation_deadline else None
+        ),
+        "distance_from_farmer": quotation.distance_from_farmer,
+        "ai_score": quotation.ai_score,
+        "ai_recommended": quotation.ai_recommended,
+        "farmer_decision": quotation.farmer_decision,
+        "explanation_text": quotation.explanation_text,
+        "created_at": (
+            quotation.created_at.isoformat()
+            if quotation.created_at else None
+        ),
+    }
+
+
+def calculate_ai_advisory(product, customer, offered_price, requested_quantity, distance_km):
     """
-    Farmer sends price quotation
-    to customer for a product
+    Simple, transparent 0-100 advisory score for a quotation.
+
+    This is advisory ONLY -- it never changes quotation_status or
+    farmer_decision. A farmer must always take the explicit action.
+
+    Weighting: 35% price, 25% quantity fit, 20% distance, 20% buyer reliability.
     """
 
+    # Price score: how close the offer is to the farmer's asking price
+    if product.base_price and product.base_price > 0:
+        price_ratio = offered_price / product.base_price
+        price_score = max(0.0, min(100.0, price_ratio * 100))
+    else:
+        price_score = 50.0
 
-    if current_user.role != "farmer":
+    # Quantity score: how much of the available stock this order would use
+    # (favors orders the farmer can actually fulfil)
+    if product.available_quantity and product.available_quantity > 0:
+        fit_ratio = requested_quantity / product.available_quantity
+        if fit_ratio <= 1.0:
+            quantity_score = 100.0 - (abs(0.5 - fit_ratio) * 60)
+        else:
+            quantity_score = 0.0
+        quantity_score = max(0.0, min(100.0, quantity_score))
+    else:
+        quantity_score = 0.0
 
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can create quotations"
-        )
+    # Distance score: closer buyers score higher (100km treated as far)
+    if distance_km is None:
+        distance_score = 50.0
+    else:
+        distance_score = max(0.0, min(100.0, 100.0 - (distance_km))) if distance_km <= 100 else 0.0
+
+    # Reliability score: taken straight from the buyer's track record
+    reliability_score = customer.reliability_score if customer.reliability_score is not None else 50.0
+
+    overall = (
+        (price_score * 0.35)
+        + (quantity_score * 0.25)
+        + (distance_score * 0.20)
+        + (reliability_score * 0.20)
+    )
+    overall = round(max(0.0, min(100.0, overall)), 2)
+
+    explanation = (
+        f"Offer is {round((offered_price / product.base_price) * 100) if product.base_price else '--'}% "
+        f"of asking price. Buyer reliability: {round(reliability_score)}/100. "
+        f"Requested quantity fits {'within' if quantity_score > 0 else 'beyond'} available stock. "
+        f"This score is advisory only -- you decide."
+    )
+
+    return {
+        "price_score": round(price_score, 2),
+        "quantity_score": round(quantity_score, 2),
+        "distance_score": round(distance_score, 2),
+        "reliability_score": round(reliability_score, 2),
+        "overall_score": overall,
+        "explanation": explanation,
+    }
 
 
-    product = db.query(Product).filter(
-        Product.id == quotation_data.product_id
+# ==========================================================
+# Create Quotation (Customer)
+# ==========================================================
+
+@quotation_bp.route("/", methods=["POST"])
+@jwt_required()
+def create_quotation():
+    """Customer sends an offer on a product."""
+
+    user_type, user = current_user()
+
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can create quotations."
+        }), 403
+
+    data = request.get_json(silent=True) or {}
+
+    required = ["product_id", "offered_price", "requested_quantity"]
+    missing = [f for f in required if data.get(f) in (None, "")]
+    if missing:
+        return jsonify({
+            "success": False,
+            "message": f"Missing required fields: {', '.join(missing)}"
+        }), 400
+
+    product = Product.query.filter_by(
+        product_id=data["product_id"], active_status=True
     ).first()
 
+    if product is None:
+        return jsonify({
+            "success": False,
+            "message": "Product not found."
+        }), 404
 
-    if not product:
+    try:
+        offered_price = float(data["offered_price"])
+        requested_quantity = float(data["requested_quantity"])
+    except (TypeError, ValueError):
+        return jsonify({
+            "success": False,
+            "message": "offered_price and requested_quantity must be numbers."
+        }), 400
 
-        raise HTTPException(
-            status_code=404,
-            detail="Product not found"
-        )
+    if offered_price <= 0 or requested_quantity <= 0:
+        return jsonify({
+            "success": False,
+            "message": "offered_price and requested_quantity must be greater than 0."
+        }), 400
 
+    if requested_quantity > product.available_quantity:
+        return jsonify({
+            "success": False,
+            "message": "Requested quantity exceeds available stock."
+        }), 400
+
+    distance_km = data.get("distance_from_farmer")
+
+    quotation_deadline = None
+    if data.get("quotation_deadline"):
+        try:
+            quotation_deadline = datetime.fromisoformat(data["quotation_deadline"])
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "message": "quotation_deadline must be an ISO 8601 datetime."
+            }), 400
+
+    advisory = calculate_ai_advisory(
+        product, user, offered_price, requested_quantity, distance_km
+    )
 
     quotation = Quotation(
-
-        farmer_id=current_user.id,
-
-        customer_id=quotation_data.customer_id,
-
-        product_id=quotation_data.product_id,
-
-        quantity=quotation_data.quantity,
-
-        offered_price=quotation_data.offered_price,
-
-        message=quotation_data.message,
-
-        status="pending"
-
+        customer_id=user.customer_id,
+        product_id=product.product_id,
+        offered_price=offered_price,
+        requested_quantity=requested_quantity,
+        quotation_status="Pending",
+        quotation_deadline=quotation_deadline,
+        distance_from_farmer=distance_km,
+        ai_score=advisory["overall_score"],
+        ai_recommended=advisory["overall_score"] >= 60,
+        farmer_decision="Pending",
     )
 
-
-    db.add(quotation)
-
-    db.commit()
-
-    db.refresh(quotation)
-
-
-
-    return {
-
-        "message":
-        "Quotation created successfully",
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-# ==========================================
-# Customer View Received Quotations
-# ==========================================
-
-@router.get("/customer/inbox")
-def customer_quotation_inbox(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Customer views quotations
-    received from farmers
-    """
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can view quotations"
-        )
-
-
-    quotations = db.query(Quotation).filter(
-        Quotation.customer_id == current_user.id
-    ).order_by(
-        Quotation.created_at.desc()
-    ).all()
-
-
-
-    result = []
-
-
-    for quotation in quotations:
-
-        result.append({
-
-            "quotation_id": quotation.id,
-
-            "farmer_id": quotation.farmer_id,
-
-            "product_id": quotation.product_id,
-
-            "quantity": quotation.quantity,
-
-            "offered_price": quotation.offered_price,
-
-            "message": quotation.message,
-
-            "status": quotation.status,
-
-            "created_at": quotation.created_at
-
-        })
-
-
-    return {
-
-        "total":
-        len(result),
-
-        "quotations":
-        result
-
-    }
-
-
-
-# ==========================================
-# Farmer Sent Quotations History
-# ==========================================
-
-@router.get("/farmer/history")
-def farmer_quotation_history(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can view quotation history"
-        )
-
-
-    quotations = db.query(Quotation).filter(
-        Quotation.farmer_id == current_user.id
-    ).order_by(
-        Quotation.created_at.desc()
-    ).all()
-
-
-
-    history = []
-
-
-    for quotation in quotations:
-
-        history.append({
-
-            "quotation_id":
-            quotation.id,
-
-            "customer_id":
-            quotation.customer_id,
-
-            "product_id":
-            quotation.product_id,
-
-            "price":
-            quotation.offered_price,
-
-            "quantity":
-            quotation.quantity,
-
-            "status":
-            quotation.status
-
-        })
-
-
-
-    return {
-
-        "total":
-        len(history),
-
-        "quotations":
-        history
-
-    }
-
-
-
-# ==========================================
-# View Single Quotation
-# ==========================================
-
-@router.get("/{quotation_id}")
-def get_quotation(
-    quotation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-
-
-    if (
-        quotation.customer_id != current_user.id
-        and
-        quotation.farmer_id != current_user.id
-    ):
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    return {
-
-        "quotation_id":
-        quotation.id,
-
-        "farmer_id":
-        quotation.farmer_id,
-
-        "customer_id":
-        quotation.customer_id,
-
-        "product_id":
-        quotation.product_id,
-
-        "quantity":
-        quotation.quantity,
-
-        "offered_price":
-        quotation.offered_price,
-
-        "message":
-        quotation.message,
-
-        "status":
-        quotation.status
-
-    }
-# ==========================================
-# Customer Accept Quotation
-# ==========================================
-
-@router.put("/{quotation_id}/accept")
-def accept_quotation(
-    quotation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Customer accepts farmer quotation
-    """
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can accept quotations"
-        )
-
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-
-    if quotation.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="This quotation is not for you"
-        )
-
-
-    if quotation.status != "pending":
-
-        raise HTTPException(
-            status_code=400,
-            detail="Quotation already processed"
-        )
-
-
-    quotation.status = "accepted"
-
-
-    db.commit()
-
-    db.refresh(quotation)
-
-
-    return {
-
-        "message":
-        "Quotation accepted",
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-
-
-
-# ==========================================
-# Customer Reject Quotation
-# ==========================================
-
-@router.put("/{quotation_id}/reject")
-def reject_quotation(
-    quotation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can reject quotations"
-        )
-
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-
-
-    if quotation.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    quotation.status = "rejected"
-
-
-    db.commit()
-
-
-
-    return {
-
-        "message":
-        "Quotation rejected",
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-
-
-
-# ==========================================
-# Farmer Update Quotation
-# ==========================================
-
-@router.put("/{quotation_id}")
-def update_quotation(
-    quotation_id: int,
-    quotation_data: QuotationCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Farmer modifies quotation price,
-    quantity or message.
-    """
-
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can update quotations"
-        )
-
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-
-
-    if quotation.farmer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="You cannot modify this quotation"
-        )
-
-
-
-    if quotation.status != "pending":
-
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot edit processed quotation"
-        )
-
-
-
-    quotation.quantity = quotation_data.quantity
-
-    quotation.offered_price = quotation_data.offered_price
-
-    quotation.message = quotation_data.message
-
-
-    db.commit()
-
-    db.refresh(quotation)
-
-
-
-    return {
-
-        "message":
-        "Quotation updated successfully",
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-# ==========================================
-# Customer Counter Offer
-# ==========================================
-
-@router.put("/{quotation_id}/counter")
-def counter_offer(
-    quotation_id: int,
-    quotation_data: QuotationCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Customer sends a counter price
-    to farmer for negotiation.
-    """
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can send counter offers"
-        )
-
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-
-    if quotation.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-    if quotation.status != "pending":
-
-        raise HTTPException(
-            status_code=400,
-            detail="Negotiation closed"
-        )
-
-
-    quotation.offered_price = (
-        quotation_data.offered_price
+    db.session.add(quotation)
+    db.session.flush()  # get quotation.quotation_id before commit
+
+    recommendation = AIRecommendation(
+        quotation_id=quotation.quotation_id,
+        recommendation_score=advisory["overall_score"],
+        price_score=advisory["price_score"],
+        quantity_score=advisory["quantity_score"],
+        distance_score=advisory["distance_score"],
+        reliability_score=advisory["reliability_score"],
+        overall_score=advisory["overall_score"],
+        explanation=advisory["explanation"],
+    )
+    db.session.add(recommendation)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Quotation submitted successfully.",
+        "quotation": serialize_quotation(quotation),
+        "ai_advisory": advisory
+    }), 201
+
+
+# ==========================================================
+# Get Single Quotation
+# ==========================================================
+
+@quotation_bp.route("/<int:quotation_id>", methods=["GET"])
+@jwt_required()
+def get_quotation(quotation_id):
+
+    user_type, user = current_user()
+
+    if user is None:
+        return jsonify({"success": False, "message": "Unauthorized."}), 403
+
+    quotation = Quotation.query.filter_by(quotation_id=quotation_id).first()
+
+    if quotation is None:
+        return jsonify({"success": False, "message": "Quotation not found."}), 404
+
+    if user_type == "customer" and quotation.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    if user_type == "farmer" and quotation.product.farmer_id != user.farmer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    return jsonify({
+        "success": True,
+        "quotation": serialize_quotation(quotation)
+    }), 200
+
+
+# ==========================================================
+# List Quotations -- Customer's Own
+# ==========================================================
+
+@quotation_bp.route("/customer", methods=["GET"])
+@jwt_required()
+def customer_quotations():
+
+    user_type, user = current_user()
+
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can access this endpoint."
+        }), 403
+
+    quotations = (
+        Quotation.query
+        .filter_by(customer_id=user.customer_id)
+        .order_by(Quotation.created_at.desc())
+        .all()
     )
 
-    quotation.quantity = (
-        quotation_data.quantity
+    return jsonify({
+        "success": True,
+        "count": len(quotations),
+        "quotations": [serialize_quotation(q) for q in quotations]
+    }), 200
+
+
+# ==========================================================
+# List Quotations -- Received by Farmer
+# ==========================================================
+
+@quotation_bp.route("/farmer", methods=["GET"])
+@jwt_required()
+def farmer_quotations():
+
+    user_type, user = current_user()
+
+    if user_type != "farmer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only farmers can access this endpoint."
+        }), 403
+
+    quotations = (
+        Quotation.query
+        .join(Product, Quotation.product_id == Product.product_id)
+        .filter(Product.farmer_id == user.farmer_id)
+        .order_by(Quotation.created_at.desc())
+        .all()
     )
 
-    quotation.message = (
-        quotation_data.message
-    )
-
-    quotation.status = "negotiation"
-
-
-    db.commit()
-
-    db.refresh(quotation)
+    return jsonify({
+        "success": True,
+        "count": len(quotations),
+        "quotations": [serialize_quotation(q) for q in quotations]
+    }), 200
 
 
-    return {
+# ==========================================================
+# Farmer Decision (Accept / Reject)
+# ==========================================================
 
-        "message":
-        "Counter offer sent",
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-
-
-
-# ==========================================
-# Farmer Accept Negotiation
-# ==========================================
-
-@router.put("/{quotation_id}/approve")
-def approve_negotiation(
-    quotation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
+@quotation_bp.route("/<int:quotation_id>/decision", methods=["PUT"])
+@jwt_required()
+def decide_quotation(quotation_id):
     """
-    Farmer approves negotiated quotation.
+    Farmer's explicit decision. This is the ONLY thing that can move a
+    quotation out of 'Pending' -- the AI score never decides on its own.
     """
 
+    user_type, user = current_user()
 
-    if current_user.role != "farmer":
+    if user_type != "farmer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only farmers can decide on quotations."
+        }), 403
 
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can approve"
-        )
+    quotation = Quotation.query.filter_by(quotation_id=quotation_id).first()
 
+    if quotation is None:
+        return jsonify({"success": False, "message": "Quotation not found."}), 404
 
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
+    if quotation.product.farmer_id != user.farmer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
+    if quotation.quotation_status != "Pending":
+        return jsonify({
+            "success": False,
+            "message": f"Quotation already '{quotation.quotation_status}'."
+        }), 400
 
-    if not quotation:
+    data = request.get_json(silent=True) or {}
+    decision = data.get("decision")
 
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
+    if decision not in ("Accepted", "Rejected"):
+        return jsonify({
+            "success": False,
+            "message": "decision must be 'Accepted' or 'Rejected'."
+        }), 400
 
+    quotation.farmer_decision = decision
+    quotation.quotation_status = decision
+    db.session.commit()
 
-    if quotation.farmer_id != current_user.id:
+    return jsonify({
+        "success": True,
+        "message": f"Quotation {decision.lower()}.",
+        "quotation": serialize_quotation(quotation)
+    }), 200
 
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
 
+# ==========================================================
+# Withdraw Quotation (Customer)
+# ==========================================================
 
-    if quotation.status != "negotiation":
+@quotation_bp.route("/<int:quotation_id>/withdraw", methods=["PUT"])
+@jwt_required()
+def withdraw_quotation(quotation_id):
 
-        raise HTTPException(
-            status_code=400,
-            detail="No negotiation pending"
-        )
+    user_type, user = current_user()
 
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can withdraw their own quotations."
+        }), 403
 
-    quotation.status = "accepted"
+    quotation = Quotation.query.filter_by(quotation_id=quotation_id).first()
 
+    if quotation is None:
+        return jsonify({"success": False, "message": "Quotation not found."}), 404
 
-    db.commit()
+    if quotation.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
+    if quotation.quotation_status != "Pending":
+        return jsonify({
+            "success": False,
+            "message": f"Cannot withdraw a quotation that is already '{quotation.quotation_status}'."
+        }), 400
 
-    return {
+    quotation.quotation_status = "Withdrawn"
+    db.session.commit()
 
-        "message":
-        "Negotiation approved",
+    return jsonify({
+        "success": True,
+        "message": "Quotation withdrawn.",
+        "quotation": serialize_quotation(quotation)
+    }), 200
 
-        "quotation_id":
-        quotation.id,
 
-        "status":
-        quotation.status
+# ==========================================================
+# Blueprint Health Check
+# ==========================================================
 
-    }
-
-
-
-# ==========================================
-# Quotation Status Tracker
-# ==========================================
-
-@router.get("/{quotation_id}/status")
-def quotation_status(
-    quotation_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Returns just the current status of a quotation,
-    for lightweight polling from the frontend.
-    """
-
-    quotation = db.query(Quotation).filter(
-        Quotation.id == quotation_id
-    ).first()
-
-    if not quotation:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Quotation not found"
-        )
-
-    if (
-        quotation.customer_id != current_user.id
-        and
-        quotation.farmer_id != current_user.id
-    ):
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-    return {
-
-        "quotation_id":
-        quotation.id,
-
-        "status":
-        quotation.status
-
-    }
-
-
-
-# ==========================================
-# Farmer Quotation Analytics
-# ==========================================
-
-@router.get("/farmer/analytics")
-def farmer_quotation_analytics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Shows farmer quotation performance.
-    """
-
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can view analytics"
-        )
-
-
-    quotations = db.query(Quotation).filter(
-        Quotation.farmer_id == current_user.id
-    ).all()
-
-
-    total = len(quotations)
-
-
-    accepted = len([
-        q for q in quotations
-        if q.status == "accepted"
-    ])
-
-
-    rejected = len([
-        q for q in quotations
-        if q.status == "rejected"
-    ])
-
-
-    pending = len([
-        q for q in quotations
-        if q.status == "pending"
-    ])
-
-
-
-    return {
-
-        "total_quotations":
-        total,
-
-        "accepted":
-        accepted,
-
-        "rejected":
-        rejected,
-
-        "pending":
-        pending
-
-    }
-
-
-
-# ==========================================
-# Customer Quotation Statistics
-# ==========================================
-
-@router.get("/customer/statistics")
-def customer_quotation_statistics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can view statistics"
-        )
-
-
-    quotations = db.query(Quotation).filter(
-        Quotation.customer_id == current_user.id
-    ).all()
-
-
-
-    return {
-
-        "total_received":
-        len(quotations),
-
-        "accepted":
-        len([
-            q for q in quotations
-            if q.status == "accepted"
-        ]),
-
-        "rejected":
-        len([
-            q for q in quotations
-            if q.status == "rejected"
-        ]),
-
-        "negotiation":
-        len([
-            q for q in quotations
-            if q.status == "negotiation"
-        ])
-
-    }
-
-
-
-# ==========================================
-# Search Quotations
-# ==========================================
-
-@router.get("/search")
-def search_quotations(
-    keyword: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role == "farmer":
-
-        quotations = db.query(Quotation).filter(
-            Quotation.farmer_id == current_user.id
-        ).all()
-
-
-    elif current_user.role == "customer":
-
-        quotations = db.query(Quotation).filter(
-            Quotation.customer_id == current_user.id
-        ).all()
-
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    results = []
-
-
-    for quotation in quotations:
-
-        if (
-            keyword.lower()
-            in quotation.status.lower()
-            or
-            keyword.lower()
-            in str(quotation.product_id)
-        ):
-
-            results.append({
-
-                "quotation_id":
-                quotation.id,
-
-                "product_id":
-                quotation.product_id,
-
-                "price":
-                quotation.offered_price,
-
-                "quantity":
-                quotation.quantity,
-
-                "status":
-                quotation.status
-
-            })
-
-
-    return {
-
-        "count":
-        len(results),
-
-        "results":
-        results
-
-    }
-
-
-
-# ==========================================
-# Quotation Module Status
-# ==========================================
-
-@router.get("/")
+@quotation_bp.route("/status/ping", methods=["GET"])
 def quotation_home():
-
-    return {
-
-        "module":
-        "Quotation Management",
-
-        "status":
-        "active",
-
-        "features":
-
-        [
-
-            "Farmer Quotations",
-
-            "Customer Inbox",
-
-            "Price Negotiation",
-
-            "Accept/Reject",
-
-            "Order Conversion",
-
-            "Quotation Analytics"
-
-        ]
-
-    }
+    return jsonify({
+        "success": True,
+        "blueprint": "quotation",
+        "status": "active"
+    }), 200

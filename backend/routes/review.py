@@ -2,1260 +2,327 @@
 review.py
 =========
 
-Review and rating management routes for AgriConnect.
+Review and rating routes for AgriConnect (Flask).
 
 Features:
-    - Customer product reviews
-    - Farmer ratings
-    - Review management
-    - Trust score calculation
+    - Customer reviews a farmer, tied to one delivered order
+      (verified-purchase-only, enforced by the unique order_id
+      constraint on the Review model)
+    - View / update / delete a review
+    - Farmer's average_rating and total_reviews stay in sync
 """
 
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from database import db
+from models import Customer, Farmer, Order, Review
 
-from backend.database import get_db
-from backend.models import (
-    Review,
-    Product,
-    Order
-)
-
-from backend.schemas import (
-    ReviewCreate,
-    ReviewUpdate
-)
-
-from backend.auth import get_current_user
-
-
-
-router = APIRouter(
-    prefix="/reviews",
-    tags=["Reviews"]
+review_bp = Blueprint(
+    "review",
+    __name__,
+    url_prefix="/api/reviews"
 )
 
 
+# ==========================================================
+# Helper Functions
+# ==========================================================
 
-# ==========================================
-# Create Review
-# ==========================================
+def current_user():
+    """Return (user_type, user_object) for the logged-in JWT identity."""
 
-@router.post("/")
-def create_review(
-    review_data: ReviewCreate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+    claims = get_jwt()
+    user_type = claims.get("user_type")
+    user_id = int(get_jwt_identity())
 
-    """
-    Customer reviews purchased product.
-    """
+    if user_type == "farmer":
+        return user_type, Farmer.query.filter_by(
+            farmer_id=user_id, active_status=True
+        ).first()
 
+    if user_type == "customer":
+        return user_type, Customer.query.filter_by(
+            customer_id=user_id, active_status=True
+        ).first()
 
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can create reviews"
-        )
-
-
-    product = db.query(Product).filter(
-        Product.id == review_data.product_id
-    ).first()
+    return None, None
 
 
-    if not product:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Product not found"
-        )
-
-
-    # Check purchase history
-
-    order = db.query(Order).filter(
-        Order.customer_id == current_user.id,
-        Order.product_id == review_data.product_id,
-        Order.status == "delivered"
-    ).first()
+def serialize_review(review):
+    return {
+        "review_id": review.review_id,
+        "customer_id": review.customer_id,
+        "farmer_id": review.farmer_id,
+        "order_id": review.order_id,
+        "rating": review.rating,
+        "review_text": review.review_text,
+        "review_date": (
+            review.review_date.isoformat()
+            if review.review_date else None
+        ),
+    }
 
 
-    if not order:
+def recalculate_farmer_rating(farmer):
+    """Recompute a farmer's average_rating / total_reviews from their reviews."""
 
-        raise HTTPException(
-            status_code=400,
-            detail="You can review only purchased products"
-        )
-
-
-
-    existing_review = db.query(Review).filter(
-        Review.customer_id == current_user.id,
-        Review.product_id == review_data.product_id
-    ).first()
-
-
-
-    if existing_review:
-
-        raise HTTPException(
-            status_code=400,
-            detail="You already reviewed this product"
-        )
-
-
-
-    review = Review(
-
-        customer_id=current_user.id,
-
-        product_id=review_data.product_id,
-
-        farmer_id=product.farmer_id,
-
-        rating=review_data.rating,
-
-        comment=review_data.comment
-
+    reviews = farmer.reviews.all()
+    farmer.total_reviews = len(reviews)
+    farmer.average_rating = (
+        round(sum(r.rating for r in reviews) / len(reviews), 2) if reviews else 0.0
     )
 
 
-
-    db.add(review)
-
-    db.commit()
-
-    db.refresh(review)
-
-
-
-    return {
-
-        "message":
-        "Review added successfully",
-
-        "review_id":
-        review.id
-
-    }
-# ==========================================
-# View Product Reviews
-# ==========================================
-
-@router.get("/product/{product_id}")
-def get_product_reviews(
-    product_id: int,
-    db: Session = Depends(get_db)
-):
-
-    """
-    Shows all reviews for a product.
-    """
-
-
-    product = db.query(Product).filter(
-        Product.id == product_id
-    ).first()
-
-
-    if not product:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Product not found"
-        )
-
-
-
-    reviews = db.query(Review).filter(
-        Review.product_id == product_id
-    ).order_by(
-        Review.created_at.desc()
-    ).all()
-
-
-
-    result = []
-
-
-    for review in reviews:
-
-        result.append({
-
-            "review_id":
-            review.id,
-
-            "customer_id":
-            review.customer_id,
-
-            "rating":
-            review.rating,
-
-            "comment":
-            review.comment,
-
-            "date":
-            review.created_at
-
-        })
-
-
-
-    return {
-
-        "product_id":
-        product_id,
-
-        "total_reviews":
-        len(result),
-
-        "reviews":
-        result
-
-    }
-
-
-
-# ==========================================
-# View Farmer Reviews
-# ==========================================
-
-@router.get("/farmer/{farmer_id}")
-def get_farmer_reviews(
-    farmer_id: int,
-    db: Session = Depends(get_db)
-):
-
-    """
-    Shows farmer reputation based on reviews.
-    """
-
-
-    reviews = db.query(Review).filter(
-        Review.farmer_id == farmer_id
-    ).order_by(
-        Review.created_at.desc()
-    ).all()
-
-
-
-    if not reviews:
-
-        return {
-
-            "farmer_id":
-            farmer_id,
-
-            "average_rating":
-            0,
-
-            "total_reviews":
-            0,
-
-            "reviews":
-            []
-
-        }
-
-
-
-    total_rating = sum(
-        review.rating
-        for review in reviews
-    )
-
-
-    average_rating = (
-        total_rating / len(reviews)
-    )
-
-
-
-    result = []
-
-
-    for review in reviews:
-
-        result.append({
-
-            "review_id":
-            review.id,
-
-            "product_id":
-            review.product_id,
-
-            "rating":
-            review.rating,
-
-            "comment":
-            review.comment,
-
-            "date":
-            review.created_at
-
-        })
-
-
-
-    return {
-
-        "farmer_id":
-        farmer_id,
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "total_reviews":
-        len(result),
-
-        "reviews":
-        result
-
-    }
-
-
-
-# ==========================================
-# Customer Review History
-# ==========================================
-
-@router.get("/customer/history")
-def customer_review_history(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can view review history"
-        )
-
-
-
-    reviews = db.query(Review).filter(
-        Review.customer_id == current_user.id
-    ).order_by(
-        Review.created_at.desc()
-    ).all()
-
-
-
-    history = []
-
-
-    for review in reviews:
-
-        history.append({
-
-            "review_id":
-            review.id,
-
-            "product_id":
-            review.product_id,
-
-            "rating":
-            review.rating,
-
-            "comment":
-            review.comment,
-
-            "date":
-            review.created_at
-
-        })
-
-
-
-    return {
-
-        "total_reviews":
-        len(history),
-
-        "reviews":
-        history
-
-    }
-
-
-
-# ==========================================
-# View Single Review
-# ==========================================
-
-@router.get("/{review_id}")
-def get_review(
-    review_id: int,
-    db: Session = Depends(get_db)
-):
-
-
-    review = db.query(Review).filter(
-        Review.id == review_id
-    ).first()
-
-
-
-    if not review:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Review not found"
-        )
-
-
-
-    return {
-
-        "review_id":
-        review.id,
-
-        "customer_id":
-        review.customer_id,
-
-        "product_id":
-        review.product_id,
-
-        "farmer_id":
-        review.farmer_id,
-
-        "rating":
-        review.rating,
-
-        "comment":
-        review.comment,
-
-        "created_at":
-        review.created_at
-
-    }
-# ==========================================
-# Update Review
-# ==========================================
-
-@router.put("/{review_id}")
-def update_review(
-    review_id: int,
-    review_data: ReviewUpdate,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Customer updates their review.
-    """
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can update reviews"
-        )
-
-
-    review = db.query(Review).filter(
-        Review.id == review_id
-    ).first()
-
-
-    if not review:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Review not found"
-        )
-
-
-    if review.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="You cannot edit this review"
-        )
-
-
-
-    if review_data.rating:
-
-        if review_data.rating < 1 or review_data.rating > 5:
-
-            raise HTTPException(
-                status_code=400,
-                detail="Rating must be between 1 and 5"
-            )
-
-
-        review.rating = review_data.rating
-
-
-
-    if review_data.comment:
-
-        review.comment = review_data.comment
-
-
-
-    db.commit()
-
-    db.refresh(review)
-
-
-
-    return {
-
-        "message":
-        "Review updated successfully",
-
-        "review_id":
-        review.id
-
-    }
-
-
-
-# ==========================================
-# Delete Review
-# ==========================================
-
-@router.delete("/{review_id}")
-def delete_review(
-    review_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Customer deletes own review.
-    """
-
-
-    if current_user.role != "customer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only customers can delete reviews"
-        )
-
-
-
-    review = db.query(Review).filter(
-        Review.id == review_id
-    ).first()
-
-
-
-    if not review:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Review not found"
-        )
-
-
-
-    if review.customer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="You cannot delete this review"
-        )
-
-
-
-    db.delete(review)
-
-    db.commit()
-
-
-
-    return {
-
-        "message":
-        "Review deleted successfully"
-
-    }
-
-
-
-# ==========================================
-# Validate Rating
-# ==========================================
-
-def validate_rating(rating):
-
-    """
-    Internal helper function
-    """
+# ==========================================================
+# Create Review (Customer, verified purchase only)
+# ==========================================================
+
+@review_bp.route("/", methods=["POST"])
+@jwt_required()
+def create_review():
+
+    user_type, user = current_user()
+
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can leave reviews."
+        }), 403
+
+    data = request.get_json(silent=True) or {}
+
+    order_id = data.get("order_id")
+    rating = data.get("rating")
+
+    if not order_id or rating is None:
+        return jsonify({
+            "success": False,
+            "message": "order_id and rating are required."
+        }), 400
+
+    try:
+        rating = int(rating)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "rating must be an integer 1-5."}), 400
 
     if rating < 1 or rating > 5:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Rating should be between 1 and 5"
-        )
-
-
-
-# ==========================================
-# Farmer Respond To Review
-# ==========================================
-
-@router.put("/{review_id}/response")
-def farmer_response(
-    review_id: int,
-    response: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Farmer replies to customer feedback.
-    """
-
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can respond"
-        )
-
-
-
-    review = db.query(Review).filter(
-        Review.id == review_id
-    ).first()
-
-
-
-    if not review:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Review not found"
-        )
-
-
-
-    if review.farmer_id != current_user.id:
-
-        raise HTTPException(
-            status_code=403,
-            detail="This review is not for you"
-        )
-
-
-
-    review.farmer_response = response
-
-
-    db.commit()
-
-    db.refresh(review)
-
-
-
-    return {
-
-        "message":
-        "Response added successfully",
-
-        "review_id":
-        review.id,
-
-        "response":
-        review.farmer_response
-
-    }
-# ==========================================
-# Review Analytics
-# ==========================================
-
-@router.get("/analytics/summary")
-def review_analytics(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Review statistics for users.
-    """
-
-
-    if current_user.role == "farmer":
-
-        reviews = db.query(Review).filter(
-            Review.farmer_id == current_user.id
-        ).all()
-
-
-    elif current_user.role == "customer":
-
-        reviews = db.query(Review).filter(
-            Review.customer_id == current_user.id
-        ).all()
-
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    total_reviews = len(reviews)
-
-
-
-    if total_reviews == 0:
-
-        return {
-
-            "total_reviews": 0,
-
-            "average_rating": 0,
-
-            "rating_distribution": {}
-
-        }
-
-
-
-    average_rating = sum(
-        review.rating
-        for review in reviews
-    ) / total_reviews
-
-
-
-    distribution = {
-
-        "5_star": 0,
-
-        "4_star": 0,
-
-        "3_star": 0,
-
-        "2_star": 0,
-
-        "1_star": 0
-
-    }
-
-
-
-    for review in reviews:
-
-        if review.rating == 5:
-
-            distribution["5_star"] += 1
-
-        elif review.rating == 4:
-
-            distribution["4_star"] += 1
-
-        elif review.rating == 3:
-
-            distribution["3_star"] += 1
-
-        elif review.rating == 2:
-
-            distribution["2_star"] += 1
-
-        elif review.rating == 1:
-
-            distribution["1_star"] += 1
-
-
-
-    return {
-
-        "total_reviews":
-        total_reviews,
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "rating_distribution":
-        distribution
-
-    }
-
-
-
-# ==========================================
-# Farmer Trust Score
-# ==========================================
-
-@router.get("/farmer/{farmer_id}/trust-score")
-def farmer_trust_score(
-    farmer_id: int,
-    db: Session = Depends(get_db)
-):
-
-    """
-    Calculates farmer reliability score.
-
-    Used for:
-        - Buyer confidence
-        - Recommendation ranking
-    """
-
-
-    reviews = db.query(Review).filter(
-        Review.farmer_id == farmer_id
-    ).all()
-
-
-
-    if not reviews:
-
-        return {
-
-            "farmer_id":
-            farmer_id,
-
-            "trust_score":
-            0
-
-        }
-
-
-
-    average_rating = sum(
-        review.rating
-        for review in reviews
-    ) / len(reviews)
-
-
-
-    # Simple trust score formula
-    trust_score = (
-        average_rating / 5
-    ) * 100
-
-
-
-    return {
-
-        "farmer_id":
-        farmer_id,
-
-        "total_reviews":
-        len(reviews),
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "trust_score":
-        round(trust_score, 2)
-
-    }
-
-
-
-# ==========================================
-# Top Rated Products
-# ==========================================
-
-@router.get("/top-products")
-def top_rated_products(
-    db: Session = Depends(get_db)
-):
-
-    """
-    Returns products with best ratings.
-    """
-
-
-    products = db.query(Product).all()
-
-
-
-    ranking = []
-
-
-
-    for product in products:
-
-
-        reviews = db.query(Review).filter(
-            Review.product_id == product.id
-        ).all()
-
-
-
-        if reviews:
-
-
-            average = sum(
-                review.rating
-                for review in reviews
-            ) / len(reviews)
-
-
-
-            ranking.append({
-
-                "product_id":
-                product.id,
-
-                "average_rating":
-                round(average, 2),
-
-                "total_reviews":
-                len(reviews)
-
-            })
-
-
-
-    ranking.sort(
-        key=lambda x: x["average_rating"],
-        reverse=True
+        return jsonify({"success": False, "message": "rating must be between 1 and 5."}), 400
+
+    order = Order.query.filter_by(order_id=order_id).first()
+
+    if order is None:
+        return jsonify({"success": False, "message": "Order not found."}), 404
+
+    if order.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "This is not your order."}), 403
+
+    if order.order_status != "Delivered":
+        return jsonify({
+            "success": False,
+            "message": "You can only review an order after it has been delivered."
+        }), 400
+
+    if order.review is not None:
+        return jsonify({
+            "success": False,
+            "message": "You have already reviewed this order."
+        }), 409
+
+    review = Review(
+        customer_id=user.customer_id,
+        farmer_id=order.farmer_id,
+        order_id=order.order_id,
+        rating=rating,
+        review_text=data.get("review_text"),
     )
 
+    db.session.add(review)
+    db.session.flush()
+
+    recalculate_farmer_rating(order.farmer)
+
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Review submitted.",
+        "review": serialize_review(review)
+    }), 201
 
 
-    return {
+# ==========================================================
+# Get Single Review
+# ==========================================================
 
-        "top_products":
-        ranking[:10]
+@review_bp.route("/<int:review_id>", methods=["GET"])
+def get_review(review_id):
 
-    }
-# ==========================================
-# Search Reviews
-# ==========================================
+    review = Review.query.filter_by(review_id=review_id).first()
 
-@router.get("/search")
-def search_reviews(
-    keyword: str,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
+    if review is None:
+        return jsonify({"success": False, "message": "Review not found."}), 404
 
-    """
-    Search reviews by comment,
-    product id, or rating.
-    """
+    return jsonify({
+        "success": True,
+        "review": serialize_review(review)
+    }), 200
 
 
-    if current_user.role == "farmer":
+# ==========================================================
+# List Reviews For a Farmer (public)
+# ==========================================================
 
-        reviews = db.query(Review).filter(
-            Review.farmer_id == current_user.id
-        ).all()
+@review_bp.route("/farmer/<int:farmer_id>", methods=["GET"])
+def farmer_reviews(farmer_id):
 
+    farmer = Farmer.query.filter_by(farmer_id=farmer_id).first()
 
-    elif current_user.role == "customer":
+    if farmer is None:
+        return jsonify({"success": False, "message": "Farmer not found."}), 404
 
-        reviews = db.query(Review).filter(
-            Review.customer_id == current_user.id
-        ).all()
+    reviews = (
+        Review.query
+        .filter_by(farmer_id=farmer_id)
+        .order_by(Review.review_date.desc())
+        .all()
+    )
 
-
-    else:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied"
-        )
-
-
-
-    results = []
-
-
-    for review in reviews:
-
-        comment_text = review.comment or ""
-
-        if (
-            keyword.lower()
-            in comment_text.lower()
-
-            or
-
-            keyword
-            in str(review.rating)
-
-            or
-
-            keyword
-            in str(review.product_id)
-        ):
-
-            results.append({
-
-                "review_id":
-                review.id,
-
-                "product_id":
-                review.product_id,
-
-                "rating":
-                review.rating,
-
-                "comment":
-                review.comment
-
-            })
+    return jsonify({
+        "success": True,
+        "farmer_id": farmer_id,
+        "average_rating": farmer.average_rating,
+        "total_reviews": farmer.total_reviews,
+        "count": len(reviews),
+        "reviews": [serialize_review(r) for r in reviews]
+    }), 200
 
 
+# ==========================================================
+# List Reviews -- Logged-in Customer's Own
+# ==========================================================
 
-    return {
+@review_bp.route("/customer", methods=["GET"])
+@jwt_required()
+def customer_reviews():
 
-        "count":
-        len(results),
+    user_type, user = current_user()
 
-        "reviews":
-        results
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can access this endpoint."
+        }), 403
 
-    }
+    reviews = (
+        Review.query
+        .filter_by(customer_id=user.customer_id)
+        .order_by(Review.review_date.desc())
+        .all()
+    )
 
-
-
-# ==========================================
-# Filter Reviews By Rating
-# ==========================================
-
-@router.get("/filter")
-def filter_reviews(
-    rating: int = None,
-    db: Session = Depends(get_db)
-):
-
-    """
-    Filter reviews based on star rating.
-    """
-
-
-    query = db.query(Review)
-
+    return jsonify({
+        "success": True,
+        "count": len(reviews),
+        "reviews": [serialize_review(r) for r in reviews]
+    }), 200
 
 
-    if rating:
+# ==========================================================
+# Update Review (Customer, own review only)
+# ==========================================================
+
+@review_bp.route("/<int:review_id>", methods=["PUT"])
+@jwt_required()
+def update_review(review_id):
+
+    user_type, user = current_user()
+
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can edit their reviews."
+        }), 403
+
+    review = Review.query.filter_by(review_id=review_id).first()
+
+    if review is None:
+        return jsonify({"success": False, "message": "Review not found."}), 404
+
+    if review.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    data = request.get_json(silent=True) or {}
+
+    if "rating" in data:
+        try:
+            rating = int(data["rating"])
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "rating must be an integer 1-5."}), 400
 
         if rating < 1 or rating > 5:
+            return jsonify({"success": False, "message": "rating must be between 1 and 5."}), 400
 
-            raise HTTPException(
-                status_code=400,
-                detail="Rating must be between 1 and 5"
-            )
+        review.rating = rating
 
+    if "review_text" in data:
+        review.review_text = data["review_text"]
 
-        query = query.filter(
-            Review.rating == rating
-        )
+    recalculate_farmer_rating(review.farmer)
+    db.session.commit()
 
+    return jsonify({
+        "success": True,
+        "message": "Review updated.",
+        "review": serialize_review(review)
+    }), 200
 
 
-    reviews = query.all()
+# ==========================================================
+# Delete Review (Customer, own review only)
+# ==========================================================
 
+@review_bp.route("/<int:review_id>", methods=["DELETE"])
+@jwt_required()
+def delete_review(review_id):
 
+    user_type, user = current_user()
 
-    result = []
+    if user_type != "customer" or user is None:
+        return jsonify({
+            "success": False,
+            "message": "Only customers can delete their reviews."
+        }), 403
 
+    review = Review.query.filter_by(review_id=review_id).first()
 
-    for review in reviews:
+    if review is None:
+        return jsonify({"success": False, "message": "Review not found."}), 404
 
-        result.append({
+    if review.customer_id != user.customer_id:
+        return jsonify({"success": False, "message": "Access denied."}), 403
 
-            "review_id":
-            review.id,
+    farmer = review.farmer
+    db.session.delete(review)
+    db.session.flush()
 
-            "product_id":
-            review.product_id,
+    recalculate_farmer_rating(farmer)
+    db.session.commit()
 
-            "rating":
-            review.rating,
+    return jsonify({
+        "success": True,
+        "message": "Review deleted."
+    }), 200
 
-            "comment":
-            review.comment
 
-        })
+# ==========================================================
+# Blueprint Health Check
+# ==========================================================
 
-
-
-    return {
-
-        "total":
-        len(result),
-
-        "reviews":
-        result
-
-    }
-
-
-
-# ==========================================
-# Farmer Review Dashboard
-# ==========================================
-
-@router.get("/farmer/dashboard")
-def farmer_review_dashboard(
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-
-    """
-    Farmer's overview of all reviews:
-    stats, rating distribution, and
-    which reviews still need a response.
-    """
-
-
-    if current_user.role != "farmer":
-
-        raise HTTPException(
-            status_code=403,
-            detail="Only farmers can view this dashboard"
-        )
-
-
-
-    reviews = db.query(Review).filter(
-        Review.farmer_id == current_user.id
-    ).order_by(
-        Review.created_at.desc()
-    ).all()
-
-
-
-    total_reviews = len(reviews)
-
-
-
-    if total_reviews == 0:
-
-        return {
-
-            "total_reviews": 0,
-
-            "average_rating": 0,
-
-            "rating_distribution": {},
-
-            "pending_responses": 0,
-
-            "recent_reviews": []
-
-        }
-
-
-
-    average_rating = sum(
-        review.rating
-        for review in reviews
-    ) / total_reviews
-
-
-
-    distribution = {
-
-        "5_star": 0,
-
-        "4_star": 0,
-
-        "3_star": 0,
-
-        "2_star": 0,
-
-        "1_star": 0
-
-    }
-
-
-
-    for review in reviews:
-
-        if review.rating == 5:
-
-            distribution["5_star"] += 1
-
-        elif review.rating == 4:
-
-            distribution["4_star"] += 1
-
-        elif review.rating == 3:
-
-            distribution["3_star"] += 1
-
-        elif review.rating == 2:
-
-            distribution["2_star"] += 1
-
-        elif review.rating == 1:
-
-            distribution["1_star"] += 1
-
-
-
-    pending_responses = sum(
-        1
-        for review in reviews
-        if not getattr(review, "farmer_response", None)
-    )
-
-
-
-    recent_reviews = []
-
-
-    for review in reviews[:10]:
-
-        recent_reviews.append({
-
-            "review_id":
-            review.id,
-
-            "product_id":
-            review.product_id,
-
-            "customer_id":
-            review.customer_id,
-
-            "rating":
-            review.rating,
-
-            "comment":
-            review.comment,
-
-            "farmer_response":
-            getattr(review, "farmer_response", None),
-
-            "date":
-            review.created_at
-
-        })
-
-
-
-    return {
-
-        "total_reviews":
-        total_reviews,
-
-        "average_rating":
-        round(average_rating, 2),
-
-        "rating_distribution":
-        distribution,
-
-        "pending_responses":
-        pending_responses,
-
-        "recent_reviews":
-        recent_reviews
-
-    }
+@review_bp.route("/status/ping", methods=["GET"])
+def review_home():
+    return jsonify({
+        "success": True,
+        "blueprint": "review",
+        "status": "active"
+    }), 200
