@@ -1,104 +1,393 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AgriConnect Dashboard</title>
 
-    <link rel="stylesheet" href="dashboard.css">
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1.0">
+
+<title>AgriConnect Dashboard</title>
+
+<link rel="stylesheet" href="css/dashboard.css">
+
+<link rel="preconnect"
+href="https://fonts.googleapis.com">
+
+<link rel="preconnect"
+href="https://fonts.gstatic.com"
+crossorigin>
+
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+rel="stylesheet">
+
+<link rel="stylesheet"
+href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+
 </head>
 
 <body>
 
-<header>
+<div class="dashboard-container">
 
-    <div class="logo">
-        🌱 AgriConnect
-    </div>
+<aside class="sidebar">
 
-    <nav>
+<div class="logo">
 
-        <a href="dashboard.html">Dashboard</a>
+<i class="fa-solid fa-seedling"></i>
 
-        <a href="farmer.html">Farmer</a>
+<span>AgriConnect</span>
 
-        <a href="customer.html">Customer</a>
+</div>
 
-        <a href="quotation.html">Quotation</a>
+<ul class="menu">
 
-        <a href="order_tracking.html">Orders</a>
+<li>
 
-        <a href="ai_result.html">AI Result</a>
+<a class="active"
+href="dashboard.html">
 
-        <a href="login.html" onclick="logout()">Logout</a>
+<i class="fa-solid fa-house"></i>
 
-    </nav>
+Dashboard
+
+</a>
+
+</li>
+
+<li>
+
+<a href="farmer.html">
+
+<i class="fa-solid fa-user-group"></i>
+
+Farmer
+
+</a>
+
+</li>
+
+<li>
+
+<a href="customer.html">
+
+<i class="fa-solid fa-cart-shopping"></i>
+
+Customer
+
+</a>
+
+</li>
+
+<li>
+
+<a href="quotation.html">
+
+<i class="fa-solid fa-comments-dollar"></i>
+
+Quotation
+
+</a>
+
+</li>
+
+<li>
+
+<a href="order_tracking.html">
+
+<i class="fa-solid fa-truck-fast"></i>
+
+Orders
+
+</a>
+
+</li>
+
+<li>
+
+<a href="ai_result.html">
+
+<i class="fa-solid fa-robot"></i>
+
+AI Result
+
+</a>
+
+</li>
+
+<li>
+
+<a href="login.html"
+onclick="logout()">
+
+<i class="fa-solid fa-right-from-bracket"></i>
+
+Logout
+
+</a>
+
+</li>
+
+</ul>
+
+</aside>
+
+<main class="main-content">
+
+<header class="topbar">
+
+<div>
+
+<h2>
+
+Dashboard
+
+</h2>
+
+<p>
+
+Welcome back to AgriConnect
+
+</p>
+
+</div>
+
+<div class="profile">
+
+<i class="fa-solid fa-circle-user"></i>
+
+<span id="username">
+
+User
+
+</span>
+
+</div>
 
 </header>
 
-<section class="welcome">
+<section class="stats">
 
-    <h1>Welcome to AgriConnect</h1>
+<div class="stat-card">
 
-    <p>
-        Directly connect farmers and customers without middlemen.
-    </p>
+<i class="fa-solid fa-user-group"></i>
+
+<h3 id="farmerCount">
+
+0
+
+</h3>
+
+<p>
+
+Farmers
+
+</p>
+
+</div>
+
+<div class="stat-card">
+
+<i class="fa-solid fa-users"></i>
+
+<h3 id="customerCount">
+
+0
+
+</h3>
+
+<p>
+
+Customers
+
+</p>
+
+</div>
+
+<div class="stat-card">
+
+<i class="fa-solid fa-box"></i>
+
+<h3 id="orderCount">
+
+0
+
+</h3>
+
+<p>
+
+Orders
+
+</p>
+
+</div>
+
+<div class="stat-card">
+
+<i class="fa-solid fa-seedling"></i>
+
+<h3 id="productCount">
+
+0
+
+</h3>
+
+<p>
+
+Products
+
+</p>
+
+</div>
+
+</section>
+<section class="quick-actions">
+
+<h2>
+
+Quick Actions
+
+</h2>
+
+<div class="action-grid">
+
+<button onclick="location.href='farmer.html'">
+
+<i class="fa-solid fa-user-plus"></i>
+
+Manage Farmers
+
+</button>
+
+<button onclick="location.href='customer.html'">
+
+<i class="fa-solid fa-cart-shopping"></i>
+
+Customers
+
+</button>
+
+<button onclick="location.href='quotation.html'">
+
+<i class="fa-solid fa-file-invoice-dollar"></i>
+
+Quotations
+
+</button>
+
+<button onclick="location.href='order_tracking.html'">
+
+<i class="fa-solid fa-truck"></i>
+
+Orders
+
+</button>
+
+<button onclick="location.href='ai_result.html'">
+
+<i class="fa-solid fa-brain"></i>
+
+AI Recommendation
+
+</button>
+
+</div>
 
 </section>
 
-<section class="cards">
+<section class="dashboard-grid">
 
-    <div class="card">
-        <h2>Farmers</h2>
-        <p>Manage farmer profiles and products.</p>
-        <button onclick="location.href='farmer.html'">
-            Open
-        </button>
-    </div>
+<div class="dashboard-card">
 
-    <div class="card">
-        <h2>Customers</h2>
-        <p>Browse products and place orders.</p>
-        <button onclick="location.href='customer.html'">
-            Open
-        </button>
-    </div>
+<h3>
 
-    <div class="card">
-        <h2>Quotations</h2>
-        <p>View and respond to quotations.</p>
-        <button onclick="location.href='quotation.html'">
-            Open
-        </button>
-    </div>
+Recent Activity
 
-    <div class="card">
-        <h2>Orders</h2>
-        <p>Track order delivery status.</p>
-        <button onclick="location.href='order_tracking.html'">
-            Open
-        </button>
-    </div>
+</h3>
 
-    <div class="card">
-        <h2>AI Crop Recommendation</h2>
-        <p>Predict suitable crops using AI.</p>
-        <button onclick="location.href='ai_result.html'">
-            Open
-        </button>
-    </div>
+<ul id="activityList">
+
+<li>Loading...</li>
+
+</ul>
+
+</div>
+
+<div class="dashboard-card">
+
+<h3>
+
+Recent Orders
+
+</h3>
+
+<table>
+
+<thead>
+
+<tr>
+
+<th>Order</th>
+
+<th>Status</th>
+
+</tr>
+
+</thead>
+
+<tbody id="recentOrders">
+
+<tr>
+
+<td colspan="2">
+
+Loading...
+
+</td>
+
+</tr>
+
+</tbody>
+
+</table>
+
+</div>
+
+<div class="dashboard-card">
+
+<h3>
+
+AI Summary
+
+</h3>
+
+<p id="aiSummary">
+
+AI recommendations will appear here.
+
+</p>
+
+</div>
 
 </section>
 
-<footer>
+<footer class="footer">
 
-    <p>
-        © 2026 AgriConnect. All Rights Reserved.
-    </p>
+<p>
+
+© 2026 AgriConnect. All Rights Reserved.
+
+</p>
 
 </footer>
 
-<script src="dashboard.js"></script>
+</main>
+
+</div>
+
+<script src="js/dashboard.js"></script>
 
 </body>
+
 </html>

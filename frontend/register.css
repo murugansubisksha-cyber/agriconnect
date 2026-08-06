@@ -1,0 +1,552 @@
+/* ===================================
+   AgriConnect Register Page
+   register.css - Part 1
+=================================== */
+
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+}
+
+:root{
+
+    --green:#1E7D32;
+    --green-dark:#145A24;
+    --green-light:#E8F5E9;
+
+    --amber:#F5A623;
+
+    --white:#FFFFFF;
+
+    --bg:#F5F8F5;
+
+    --border:#DCE5DC;
+
+    --text:#222;
+
+    --muted:#6B7280;
+
+    --danger:#D32F2F;
+
+    --success:#2E7D32;
+
+    --shadow:0 12px 30px rgba(0,0,0,.08);
+
+    --radius:15px;
+
+}
+
+body{
+
+    font-family:'Poppins',sans-serif;
+
+    background:linear-gradient(135deg,#E8F5E9,#F5F8F5);
+
+    display:flex;
+
+    justify-content:center;
+
+    align-items:center;
+
+    min-height:100vh;
+
+    padding:20px;
+
+}
+
+/* ==========================
+   Container
+========================== */
+
+.container{
+
+    width:100%;
+
+    max-width:470px;
+
+}
+
+.card{
+
+    background:#fff;
+
+    padding:35px;
+
+    border-radius:18px;
+
+    box-shadow:var(--shadow);
+
+    border:1px solid var(--border);
+
+    animation:fadeUp .7s ease;
+
+}
+
+@keyframes fadeUp{
+
+    from{
+
+        opacity:0;
+
+        transform:translateY(25px);
+
+    }
+
+    to{
+
+        opacity:1;
+
+        transform:translateY(0);
+
+    }
+
+}
+
+/* ==========================
+   Logo
+========================== */
+
+.logo{
+
+    text-align:center;
+
+    font-size:34px;
+
+    font-weight:700;
+
+    color:var(--green-dark);
+
+    margin-bottom:8px;
+
+}
+
+.logo span{
+
+    color:var(--amber);
+
+}
+
+.subtitle{
+
+    text-align:center;
+
+    color:var(--muted);
+
+    margin-bottom:28px;
+
+    font-size:15px;
+
+}
+/* ==========================
+   Form Elements
+========================== */
+
+.input-group{
+
+    margin-bottom:18px;
+
+}
+
+label{
+
+    display:block;
+
+    margin-bottom:8px;
+
+    font-size:14px;
+
+    font-weight:600;
+
+    color:var(--text);
+
+}
+
+input,
+select{
+
+    width:100%;
+
+    padding:13px 15px;
+
+    border:1px solid var(--border);
+
+    border-radius:10px;
+
+    font-size:15px;
+
+    background:#fff;
+
+    transition:.3s;
+
+}
+
+input:focus,
+select:focus{
+
+    outline:none;
+
+    border-color:var(--green);
+
+    box-shadow:0 0 0 3px rgba(30,125,50,.15);
+
+}
+
+input::placeholder{
+
+    color:#999;
+
+}
+
+/* ==========================
+   Register Button
+========================== */
+
+.btn{
+
+    width:100%;
+
+    margin-top:10px;
+
+    padding:14px;
+
+    border:none;
+
+    border-radius:10px;
+
+    background:var(--green);
+
+    color:#fff;
+
+    font-size:16px;
+
+    font-weight:600;
+
+    cursor:pointer;
+
+    display:flex;
+
+    justify-content:center;
+
+    align-items:center;
+
+    gap:10px;
+
+    transition:.3s;
+
+}
+
+.btn:hover{
+
+    background:var(--green-dark);
+
+    transform:translateY(-2px);
+
+}
+
+.btn:active{
+
+    transform:scale(.98);
+
+}
+
+.btn:disabled{
+
+    background:#9e9e9e;
+
+    cursor:not-allowed;
+
+}/* ==========================
+   Message Box
+========================== */
+
+.message{
+
+    margin-top:18px;
+
+    padding:12px 15px;
+
+    border-radius:10px;
+
+    font-size:14px;
+
+    font-weight:500;
+
+    text-align:center;
+
+    display:none;
+
+}
+
+.message.success{
+
+    display:block;
+
+    background:#E8F5E9;
+
+    color:var(--success);
+
+    border:1px solid #C8E6C9;
+
+}
+
+.message.error{
+
+    display:block;
+
+    background:#FDECEA;
+
+    color:var(--danger);
+
+    border:1px solid #F5C6CB;
+
+}
+
+/* ==========================
+   Footer Links
+========================== */
+
+.footer-link{
+
+    margin-top:18px;
+
+    text-align:center;
+
+    color:var(--muted);
+
+    font-size:14px;
+
+}
+
+.footer-link a{
+
+    color:var(--green);
+
+    text-decoration:none;
+
+    font-weight:600;
+
+    transition:.3s;
+
+}
+
+.footer-link a:hover{
+
+    color:var(--green-dark);
+
+    text-decoration:underline;
+
+}
+
+/* ==========================
+   Card Hover
+========================== */
+
+.card{
+
+    transition:.3s ease;
+
+}
+
+.card:hover{
+
+    transform:translateY(-5px);
+
+}
+
+/* ==========================
+   Input Hover
+========================== */
+
+input:hover,
+select:hover{
+
+    border-color:var(--green);
+
+}
+
+/* ==========================
+   Selection
+========================== */
+
+::selection{
+
+    background:var(--green);
+
+    color:#fff;
+
+}
+
+/* ==========================
+   Scrollbar
+========================== */
+
+::-webkit-scrollbar{
+
+    width:8px;
+
+}
+
+::-webkit-scrollbar-track{
+
+    background:#f1f1f1;
+
+}
+
+::-webkit-scrollbar-thumb{
+
+    background:var(--green);
+
+    border-radius:20px;
+
+}
+
+::-webkit-scrollbar-thumb:hover{
+
+    background:var(--green-dark);
+
+}
+/* ==========================
+   Responsive Design
+========================== */
+
+@media (max-width:992px){
+
+    .container{
+
+        max-width:500px;
+
+    }
+
+}
+
+@media (max-width:768px){
+
+    body{
+
+        padding:18px;
+
+    }
+
+    .card{
+
+        padding:30px 25px;
+
+    }
+
+    .logo{
+
+        font-size:30px;
+
+    }
+
+    .subtitle{
+
+        font-size:14px;
+
+    }
+
+    label{
+
+        font-size:14px;
+
+    }
+
+    input,
+    select{
+
+        font-size:14px;
+
+        padding:12px;
+
+    }
+
+    .btn{
+
+        padding:13px;
+
+        font-size:15px;
+
+    }
+
+}
+
+@media (max-width:480px){
+
+    body{
+
+        padding:15px;
+
+    }
+
+    .container{
+
+        width:100%;
+
+    }
+
+    .card{
+
+        padding:22px 18px;
+
+        border-radius:15px;
+
+    }
+
+    .logo{
+
+        font-size:26px;
+
+    }
+
+    .subtitle{
+
+        font-size:13px;
+
+    }
+
+    label{
+
+        font-size:13px;
+
+    }
+
+    input,
+    select{
+
+        font-size:14px;
+
+        padding:11px;
+
+    }
+
+    .btn{
+
+        font-size:14px;
+
+        padding:12px;
+
+    }
+
+    .footer-link{
+
+        font-size:13px;
+
+    }
+
+}
+
+/* ==========================
+   Smooth Transitions
+========================== */
+
+*{
+
+    transition:
+        background-color .3s ease,
+        color .3s ease,
+        border-color .3s ease,
+        box-shadow .3s ease,
+        transform .3s ease;
+
+}

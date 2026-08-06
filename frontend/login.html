@@ -4,110 +4,119 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Login | AgriConnect</title>
-<style>
-  :root{--green:#1e7d32; --green-dark:#145a24; --green-light:#e8f5e9; --amber:#f5a623; --text:#1b1b1b; --muted:#6b7280; --card:#fff; --bg:#f6f8f6; --border:#e2e8e2; --danger:#d32f2f;}
-  *{box-sizing:border-box; margin:0; padding:0;}
-  body{font-family:'Segoe UI',Roboto,Arial,sans-serif; background:var(--bg); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;}
-  a{color:var(--green); text-decoration:none;}
-  .logo{text-align:center; font-size:24px; font-weight:800; color:var(--green-dark); margin-bottom:6px;}
-  .logo span{color:var(--amber);}
-  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:34px; width:100%; max-width:400px; box-shadow:0 6px 24px rgba(0,0,0,.06);}
-  .subtitle{text-align:center; color:var(--muted); font-size:14px; margin-bottom:24px;}
-  .toggle{display:flex; background:var(--green-light); border-radius:10px; padding:4px; margin-bottom:22px;}
-  .toggle button{flex:1; padding:9px; border:none; background:transparent; border-radius:8px; cursor:pointer; font-weight:700; color:var(--green-dark); font-size:14px;}
-  .toggle button.active{background:var(--green); color:#fff;}
-  label{display:block; font-size:13px; font-weight:600; margin:14px 0 6px; color:var(--text);}
-  input{width:100%; padding:11px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px;}
-  input:focus{outline:none; border-color:var(--green);}
-  .btn{width:100%; padding:12px; border:none; border-radius:8px; background:var(--green); color:#fff; font-weight:700; font-size:15px; cursor:pointer; margin-top:22px;}
-  .btn:hover{background:var(--green-dark);}
-  .btn:disabled{opacity:.6; cursor:not-allowed;}
-  .msg{margin-top:14px; font-size:13px; padding:10px 12px; border-radius:8px; display:none;}
-  .msg.error{background:#fdecea; color:var(--danger); display:block;}
-  .msg.success{background:var(--green-light); color:var(--green-dark); display:block;}
-  .footer-link{text-align:center; margin-top:20px; font-size:14px; color:var(--muted);}
-  .back{display:block; text-align:center; margin-top:10px; font-size:13px;}
-</style>
+
+<link rel="stylesheet" href="css/login.css">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet"
+href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+
 </head>
+
 <body>
 
 <div>
-  <div class="logo">Agri<span>Connect</span></div>
-  <p class="subtitle">Sign in to your account</p>
 
-  <div class="card">
-    <div class="toggle">
-      <button type="button" id="tabFarmer" class="active" onclick="setRole('farmer')">Farmer</button>
-      <button type="button" id="tabCustomer" onclick="setRole('customer')">Customer</button>
-    </div>
-
-    <form id="loginForm">
-      <label for="identifier">Mobile Number or Email</label>
-      <input type="text" id="identifier" placeholder="9876543210 or you@email.com" required>
-
-      <label for="password">Password</label>
-      <input type="password" id="password" placeholder="••••••••" required>
-
-      <button type="submit" class="btn" id="submitBtn">Login</button>
-    </form>
-
-    <div class="msg" id="msgBox"></div>
-    <p class="footer-link">Don't have an account? <a href="register.html">Register here</a></p>
-    <a class="back" href="index.html">&larr; Back to home</a>
-  </div>
+<div class="logo">
+Agri<span>Connect</span>
 </div>
 
-<script>
-const API_BASE = "http://127.0.0.1:5000/api";
-let currentRole = "farmer";
+<p class="subtitle">
+Sign in to your account
+</p>
 
-function setRole(role){
-  currentRole = role;
-  document.getElementById('tabFarmer').classList.toggle('active', role === 'farmer');
-  document.getElementById('tabCustomer').classList.toggle('active', role === 'customer');
-}
+<div class="card">
 
-function showMsg(text, type){
-  const box = document.getElementById('msgBox');
-  box.textContent = text;
-  box.className = `msg ${type}`;
-}
+<div class="toggle">
 
-document.getElementById('loginForm').addEventListener('submit', async (e)=>{
-  e.preventDefault();
-  const btn = document.getElementById('submitBtn');
-  const identifier = document.getElementById('identifier').value.trim();
-  const password = document.getElementById('password').value;
+<button
+type="button"
+id="tabFarmer"
+class="active"
+onclick="setRole('farmer')">
+Farmer
+</button>
 
-  btn.disabled = true; btn.textContent = "Signing in...";
+<button
+type="button"
+id="tabCustomer"
+onclick="setRole('customer')">
+Customer
+</button>
 
-  const payload = { user_type: currentRole, password };
-  if(identifier.includes('@')){ payload.email = identifier; }
-  else { payload.mobile_number = identifier; }
+</div>
 
-  try{
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
+<form id="loginForm">
 
-    if(data.success){
-      localStorage.setItem('agri_token', data.access_token);
-      localStorage.setItem('agri_refresh', data.refresh_token);
-      localStorage.setItem('agri_user', JSON.stringify({ ...data.user, user_type: data.user_type }));
-      showMsg("Login successful! Redirecting...", "success");
-      setTimeout(()=> window.location.href = "dashboard.html", 700);
-    } else {
-      showMsg(data.message || "Login failed.", "error");
-    }
-  } catch(err){
-    showMsg("Could not reach the AgriConnect API. Is the backend running on port 5000?", "error");
-  } finally {
-    btn.disabled = false; btn.textContent = "Login";
-  }
-});
-</script>
+<label for="identifier">
+Mobile Number or Email
+</label>
+
+<input
+type="text"
+id="identifier"
+placeholder="9876543210 or you@email.com"
+required>
+
+<label for="password">
+Password
+</label>
+
+<input
+type="password"
+id="password"
+placeholder="••••••••"
+required>
+
+<button
+type="submit"
+class="btn"
+id="submitBtn">
+
+<i class="fa-solid fa-right-to-bracket"></i>
+
+Login
+
+</button>
+
+</form>
+
+<div
+class="msg"
+id="msgBox">
+</div>
+
+<p class="footer-link">
+
+Don't have an account?
+
+<a href="register.html">
+
+Register here
+
+</a>
+
+</p>
+
+<a
+class="back"
+href="index.html">
+
+<i class="fa-solid fa-arrow-left"></i>
+
+Back to Home
+
+</a>
+
+</div>
+
+</div>
+
+<script src="js/login.js"></script>
+
 </body>
 </html>
