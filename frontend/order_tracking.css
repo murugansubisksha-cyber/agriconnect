@@ -1,0 +1,185 @@
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+    font-family:Arial, Helvetica, sans-serif;
+}
+
+body{
+    background:#f5f7f5;
+    color:#333;
+}
+
+header{
+    background:#2e7d32;
+    color:#fff;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:15px 30px;
+    position:sticky;
+    top:0;
+    z-index:1000;
+    box-shadow:0 3px 10px rgba(0,0,0,.2);
+}
+
+header h2{
+    font-size:24px;
+}
+
+nav{
+    display:flex;
+    gap:18px;
+}
+
+nav a{
+    color:white;
+    text-decoration:none;
+    font-weight:bold;
+    transition:.3s;
+}
+
+nav a:hover{
+    color:#ffd54f;
+}
+
+.container{
+    width:92%;
+    max-width:1200px;
+    margin:30px auto;
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    box-shadow:0 5px 15px rgba(0,0,0,.1);
+}
+
+.container h1{
+    text-align:center;
+    color:#2e7d32;
+    margin-bottom:25px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+}
+
+thead{
+    background:#2e7d32;
+    color:white;
+}
+
+th,
+td{
+    padding:14px;
+    text-align:center;
+    border-bottom:1px solid #ddd;
+}
+
+tbody tr:nth-child(even){
+    background:#fafafa;
+}
+
+tbody tr:hover{
+    background:#e8f5e9;
+}
+
+.track-btn{
+    background:#2e7d32;
+    color:white;
+    border:none;
+    padding:8px 15px;
+    border-radius:6px;
+    cursor:pointer;
+}
+
+.track-btn:hover{
+    background:#1b5e20;
+}
+
+.modal{
+    display:none;
+    position:fixed;
+    left:0;
+    top:0;
+    width:100%;
+    height:100%;
+    background:rgba(0,0,0,.55);
+}
+
+.modal-content{
+    background:white;
+    width:500px;
+    max-width:95%;
+    margin:80px auto;
+    padding:30px;
+    border-radius:12px;
+    position:relative;
+}
+
+.close{
+    position:absolute;
+    right:15px;
+    top:10px;
+    font-size:28px;
+    cursor:pointer;
+}
+
+.timeline{
+    margin-top:25px;
+}
+
+.step{
+    display:flex;
+    align-items:center;
+    margin:18px 0;
+    opacity:.35;
+    transition:.3s;
+}
+
+.step span{
+    width:40px;
+    height:40px;
+    border-radius:50%;
+    background:#bdbdbd;
+    color:white;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    margin-right:15px;
+    font-weight:bold;
+}
+
+.step.active{
+    opacity:1;
+}
+
+.step.active span{
+    background:#2e7d32;
+}
+
+@media(max-width:768px){
+
+header{
+    flex-direction:column;
+    gap:15px;
+}
+
+nav{
+    flex-wrap:wrap;
+    justify-content:center;
+}
+
+.container{
+    overflow-x:auto;
+}
+
+table{
+    min-width:750px;
+}
+
+.modal-content{
+    width:95%;
+}
+
+}
